@@ -48,7 +48,15 @@ class SpacesViewModel: ObservableObject {
                 }
                 return
             }
-            let sortedSpaces = spaces.sorted { $0.id < $1.id }
+            // Sort spaces numerically by ID (workspace number)
+            let sortedSpaces = spaces.sorted { space1, space2 in
+                // Try to parse as integers for numeric sorting
+                if let id1 = Int(space1.id), let id2 = Int(space2.id) {
+                    return id1 < id2
+                }
+                // Fallback to string comparison if not numeric
+                return space1.id < space2.id
+            }
             DispatchQueue.main.async {
                 self.spaces = sortedSpaces
             }

@@ -59,6 +59,10 @@ struct MenuBarView: View {
             NowPlayingWidget()
                 .environmentObject(config)
 
+        case "default.audio":
+            AudioWidget()
+                .environmentObject(config)
+
         case "spacer":
             Spacer().frame(minWidth: 50, maxWidth: .infinity)
 
