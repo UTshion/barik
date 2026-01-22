@@ -2,6 +2,7 @@ import SwiftUI
 
 /// Widget for displaying system tray (menu bar) applications.
 struct SystemTrayWidget: View {
+    @EnvironmentObject var configProvider: ConfigProvider
     @StateObject private var viewModel = SystemTrayViewModel()
     @State private var rect: CGRect = .zero
     
@@ -51,6 +52,13 @@ struct SystemTrayWidget: View {
                 MenuBarPopup.show(rect: rect, id: "systemtray") {
                     SystemTrayPopup(viewModel: viewModel)
                 }
+            }
+            .onAppear {
+                // Update viewModel with config
+                viewModel.updateConfig(configProvider.config)
+            }
+            .onChange(of: configProvider.config) { _, newConfig in
+                viewModel.updateConfig(newConfig)
             }
         }
     }

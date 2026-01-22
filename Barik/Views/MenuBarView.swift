@@ -67,6 +67,10 @@ struct MenuBarView: View {
             SystemTrayWidget()
                 .environmentObject(config)
 
+        case "custom.command":
+            CustomCommandWidget()
+                .environmentObject(config)
+
         case "spacer":
             Spacer().frame(minWidth: 50, maxWidth: .infinity)
 

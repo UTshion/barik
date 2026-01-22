@@ -102,6 +102,15 @@ final class ConfigManager: ObservableObject {
             [popup.default.time]
             view-variant = "box"
             
+            # System Tray Widget Configuration
+            # [widgets.default.systemtray]
+            # use-window-detection = true  # Use CGWindowListCopyWindowInfo to detect menu bar windows
+            # allowed-apps = ["Slack", "Spotify", "Discord"]  # Only show these apps (empty = show all)
+            # denied-apps = ["System Preferences"]  # Never show these apps
+            
+            # Custom Command Widget (waybar/eww style)
+            # { "custom.command" = { command = "date '+%H:%M'", interval = 1, format = "Time: {output}", click-command = "open -a Calendar" } }
+            
             [background]
             enabled = true
             """
