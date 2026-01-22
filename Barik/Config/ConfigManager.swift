@@ -77,7 +77,8 @@ final class ConfigManager: ObservableObject {
                 "default.battery",
                 "divider",
                 # { "default.time" = { time-zone = "America/Los_Angeles", format = "E d, hh:mm" } },
-                "default.time"
+                "default.time",
+                # "default.systemtray"  # Uncomment to show system tray applications
             ]
 
             [widgets.default.spaces]

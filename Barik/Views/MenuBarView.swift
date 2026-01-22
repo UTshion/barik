@@ -63,6 +63,10 @@ struct MenuBarView: View {
             AudioWidget()
                 .environmentObject(config)
 
+        case "default.systemtray":
+            SystemTrayWidget()
+                .environmentObject(config)
+
         case "spacer":
             Spacer().frame(minWidth: 50, maxWidth: .infinity)
 
