@@ -27,7 +27,6 @@ class CalendarManager: ObservableObject {
     init(configProvider: ConfigProvider) {
         self.configProvider = configProvider
         requestAccess()
-        startMonitoring()
     }
 
     deinit {
@@ -52,15 +51,24 @@ class CalendarManager: ObservableObject {
     }
 
     private func requestAccess() {
-        eventStore.requestFullAccessToEvents { [weak self] granted, error in
-            if granted && error == nil {
-                self?.fetchTodaysEvents()
-                self?.fetchTomorrowsEvents()
-                self?.fetchNextEvent()
-            } else {
-                print(
-                    "Calendar access not granted: \(String(describing: error))")
+        let status = EKEventStore.authorizationStatus(for: .event)
+        switch status {
+        case .fullAccess:
+            startMonitoring()
+        case .notDetermined:
+            eventStore.requestFullAccessToEvents { [weak self] granted, error in
+                guard granted, error == nil else {
+                    if let error {
+                        print("Calendar access not granted: \(error)")
+                    }
+                    return
+                }
+                DispatchQueue.main.async {
+                    self?.startMonitoring()
+                }
             }
+        default:
+            break
         }
     }
 
