@@ -47,6 +47,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             name: NSWorkspace.screensDidWakeNotification,
             object: nil)
 
+        // Also handle system-level wake (lid open, etc.) — panels can lose their
+        // level association after a long sleep and silently disappear.
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self,
+            selector: #selector(systemDidWake(_:)),
+            name: NSWorkspace.didWakeNotification,
+            object: nil)
+
+        // Surface main-thread stalls to Console.app for diagnosing freezes.
+        MainThreadStallDetector.shared.start()
+
         logger.info("Barik launched successfully")
     }
 
@@ -57,6 +68,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func screensDidWake(_ notification: Notification) {
         logger.info("Screens woke from sleep, reconfiguring panels")
+        setupPanels()
+    }
+
+    @objc private func systemDidWake(_ notification: Notification) {
+        logger.info("System woke from sleep, reconfiguring panels")
         setupPanels()
     }
 
@@ -82,7 +98,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     ) {
         if let existingPanel = panel {
             existingPanel.setFrame(frame, display: true)
-            // Ensure the panel is visible after screen configuration changes.
+            // Re-assert level: after long sleeps macOS can demote panels and
+            // they vanish behind other windows. Re-setting forces the level back.
+            existingPanel.level = NSWindow.Level(rawValue: level)
+            existingPanel.setIsVisible(true)
             existingPanel.orderFront(nil)
             return
         }
