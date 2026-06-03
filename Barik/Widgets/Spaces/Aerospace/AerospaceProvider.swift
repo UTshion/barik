@@ -4,11 +4,15 @@ class AerospaceSpacesProvider: SpacesProvider, SwitchableSpacesProvider {
     typealias SpaceType = AeroSpace
     let executablePath = ConfigManager.shared.config.aerospace.path
 
+    private static let timeout: TimeInterval = 3.0
+
     func getSpacesWithWindows() -> [AeroSpace]? {
         guard var spaces = fetchSpaces(), let windows = fetchWindows() else {
             return nil
         }
-        if let focusedSpace = fetchFocusedSpace() {
+        // Capture the focused space once per call instead of re-querying inside the loop.
+        let focusedSpace = fetchFocusedSpace()
+        if let focusedSpace {
             for i in 0..<spaces.count {
                 spaces[i].isFocused = (spaces[i].id == focusedSpace.id)
             }
@@ -26,7 +30,7 @@ class AerospaceSpacesProvider: SpacesProvider, SwitchableSpacesProvider {
                     space.windows.append(mutableWindow)
                     spaceDict[ws] = space
                 }
-            } else if let focusedSpace = fetchFocusedSpace() {
+            } else if let focusedSpace {
                 if var space = spaceDict[focusedSpace.id] {
                     space.windows.append(mutableWindow)
                     spaceDict[focusedSpace.id] = space
@@ -49,20 +53,18 @@ class AerospaceSpacesProvider: SpacesProvider, SwitchableSpacesProvider {
     }
 
     private func runAerospaceCommand(arguments: [String]) -> Data? {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: executablePath)
-        process.arguments = arguments
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        do {
-            try process.run()
-        } catch {
-            print("Aerospace error: \(error)")
+        guard
+            let result = SubprocessRunner.run(
+                executable: executablePath,
+                arguments: arguments,
+                timeout: Self.timeout)
+        else {
             return nil
         }
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
-        return data
+        if result.timedOut || result.exitCode != 0 {
+            return nil
+        }
+        return result.stdout
     }
 
     private func fetchSpaces() -> [AeroSpace]? {
@@ -73,9 +75,8 @@ class AerospaceSpacesProvider: SpacesProvider, SwitchableSpacesProvider {
         else {
             return nil
         }
-        let decoder = JSONDecoder()
         do {
-            return try decoder.decode([AeroSpace].self, from: data)
+            return try JSONDecoder().decode([AeroSpace].self, from: data)
         } catch {
             print("Decode spaces error: \(error)")
             return nil
@@ -91,9 +92,8 @@ class AerospaceSpacesProvider: SpacesProvider, SwitchableSpacesProvider {
         else {
             return nil
         }
-        let decoder = JSONDecoder()
         do {
-            return try decoder.decode([AeroWindow].self, from: data)
+            return try JSONDecoder().decode([AeroWindow].self, from: data)
         } catch {
             print("Decode windows error: \(error)")
             return nil
@@ -108,9 +108,8 @@ class AerospaceSpacesProvider: SpacesProvider, SwitchableSpacesProvider {
         else {
             return nil
         }
-        let decoder = JSONDecoder()
         do {
-            return try decoder.decode([AeroSpace].self, from: data).first
+            return try JSONDecoder().decode([AeroSpace].self, from: data).first
         } catch {
             print("Decode focused space error: \(error)")
             return nil
@@ -125,9 +124,8 @@ class AerospaceSpacesProvider: SpacesProvider, SwitchableSpacesProvider {
         else {
             return nil
         }
-        let decoder = JSONDecoder()
         do {
-            return try decoder.decode([AeroWindow].self, from: data).first
+            return try JSONDecoder().decode([AeroWindow].self, from: data).first
         } catch {
             print("Decode focused window error: \(error)")
             return nil
