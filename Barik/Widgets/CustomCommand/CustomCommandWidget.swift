@@ -4,24 +4,26 @@ import SwiftUI
 struct CustomCommandWidget: View {
     @EnvironmentObject var configProvider: ConfigProvider
     var config: ConfigData { configProvider.config }
-    
+
     @State private var output: String = ""
     @State private var error: String?
     @State private var isRunning: Bool = false
     @State private var timer: Timer?
-    
+
     var command: String? { config["command"]?.stringValue }
     var interval: Double {
-        guard let value = config["interval"] else { return 5.0 }
-        switch value {
-        case .double(let d): return d
-        case .int(let i): return Double(i)
-        default: return 5.0
+        let raw: Double
+        switch config["interval"] {
+        case .some(.double(let d)): raw = d
+        case .some(.int(let i)): raw = Double(i)
+        default: raw = 5.0
         }
+        // Floor to 1s so a typo can't turn this into a fork-bomb.
+        return max(1.0, raw)
     }
     var format: String? { config["format"]?.stringValue }
     var clickCommand: String? { config["click-command"]?.stringValue }
-    
+
     var body: some View {
         Group {
             if let error = error {
@@ -51,82 +53,77 @@ struct CustomCommandWidget: View {
             }
         }
     }
-    
+
     private func executeCommand() {
         guard let cmd = command else {
             error = "No command specified"
             return
         }
-        
+        // Re-entrancy guard: skip the tick if the previous command is still running.
+        // Prevents a slow user command from queueing background work indefinitely.
+        guard !isRunning else { return }
+
         isRunning = true
-        DispatchQueue.global(qos: .userInitiated).async {
-            let result = executeShellCommand(cmd)
+        let timeout = min(max(1.0, interval / 2.0), 5.0)
+        DispatchQueue.global(qos: .utility).async {
+            let result = SubprocessRunner.run(
+                executable: "/bin/bash",
+                arguments: ["-c", cmd],
+                timeout: timeout)
             DispatchQueue.main.async {
-                if let output = result.output, !output.isEmpty {
-                    self.output = formatOutput(output)
-                    self.error = nil
-                } else if let error = result.error {
-                    self.error = error
+                defer { isRunning = false }
+                guard let result else {
+                    self.error = "Failed to launch command"
                     self.output = ""
+                    return
                 }
-                isRunning = false
+                if result.timedOut {
+                    self.error = "Command timed out after \(Int(timeout))s"
+                    self.output = ""
+                    return
+                }
+                let stdout = String(data: result.stdout, encoding: .utf8)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                let stderr = String(data: result.stderr, encoding: .utf8)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                if result.exitCode != 0 {
+                    self.error = stderr.isEmpty
+                        ? "Command failed with exit code \(result.exitCode)"
+                        : stderr
+                    self.output = ""
+                } else {
+                    self.output = formatOutput(stdout)
+                    self.error = nil
+                }
             }
         }
     }
-    
+
     private func executeClickCommand(_ cmd: String) {
         DispatchQueue.global(qos: .userInitiated).async {
-            _ = executeShellCommand(cmd)
+            _ = SubprocessRunner.run(
+                executable: "/bin/bash",
+                arguments: ["-c", cmd],
+                timeout: 5.0)
         }
     }
-    
-    private func executeShellCommand(_ command: String) -> (output: String?, error: String?) {
-        let process = Process()
-        process.launchPath = "/bin/bash"
-        process.arguments = ["-c", command]
-        
-        let outputPipe = Pipe()
-        let errorPipe = Pipe()
-        process.standardOutput = outputPipe
-        process.standardError = errorPipe
-        
-        do {
-            try process.run()
-            process.waitUntilExit()
-            
-            let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
-            let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
-            
-            let output = String(data: outputData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
-            let error = String(data: errorData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
-            
-            if process.terminationStatus != 0 {
-                return (nil, error ?? "Command failed with exit code \(process.terminationStatus)")
-            }
-            
-            return (output, nil)
-        } catch {
-            return (nil, "Failed to execute command: \(error.localizedDescription)")
-        }
-    }
-    
+
     private func formatOutput(_ output: String) -> String {
         guard let format = format else {
             return output
         }
-        
-        // Simple format replacement: {output} is replaced with the command output
         return format.replacingOccurrences(of: "{output}", with: output)
     }
-    
+
     private func startTimer() {
-        guard interval > 0 else { return }
-        
-        timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [self] _ in
+        let tickInterval = interval
+        guard tickInterval > 0 else { return }
+
+        timer = Timer.scheduledTimer(withTimeInterval: tickInterval, repeats: true) { _ in
             executeCommand()
         }
     }
-    
+
     private func stopTimer() {
         timer?.invalidate()
         timer = nil
