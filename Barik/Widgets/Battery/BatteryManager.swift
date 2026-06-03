@@ -1,13 +1,17 @@
-import Combine
 import Foundation
 import IOKit.ps
 
-/// This class monitors the battery status.
+/// Monitors battery status via IOKit power-source notifications.
+/// Event-driven — `IOPSNotificationCreateRunLoopSource` posts on the main runloop
+/// when the system's power state changes (charger plug/unplug, capacity change, etc.).
+/// A coarse safety-net timer (60s) is the only remaining polling.
 class BatteryManager: ObservableObject {
     @Published var batteryLevel: Int = 0
     @Published var isCharging: Bool = false
     @Published var isPluggedIn: Bool = false
-    private var timer: Timer?
+
+    private var runLoopSource: CFRunLoopSource?
+    private var safetyTimer: Timer?
 
     init() {
         startMonitoring()
@@ -18,20 +22,42 @@ class BatteryManager: ObservableObject {
     }
 
     private func startMonitoring() {
-        // Update every 1 second.
-        timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) {
+        updateBatteryStatus()
+        installPowerSourceObserver()
+
+        safetyTimer = Timer.scheduledTimer(withTimeInterval: 60.0, repeats: true) {
             [weak self] _ in
             self?.updateBatteryStatus()
         }
-        updateBatteryStatus()
     }
 
     private func stopMonitoring() {
-        timer?.invalidate()
-        timer = nil
+        safetyTimer?.invalidate()
+        safetyTimer = nil
+        if let source = runLoopSource {
+            CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .defaultMode)
+            runLoopSource = nil
+        }
     }
 
-    /// This method updates the battery level and charging state.
+    private func installPowerSourceObserver() {
+        let context = Unmanaged.passUnretained(self).toOpaque()
+        let callback: IOPowerSourceCallbackType = { context in
+            guard let context else { return }
+            let manager = Unmanaged<BatteryManager>.fromOpaque(context)
+                .takeUnretainedValue()
+            // Callback fires on the runloop the source is attached to (main).
+            manager.updateBatteryStatus()
+        }
+        if let source = IOPSNotificationCreateRunLoopSource(callback, context)?
+            .takeRetainedValue()
+        {
+            CFRunLoopAddSource(CFRunLoopGetMain(), source, .defaultMode)
+            runLoopSource = source
+        }
+    }
+
+    /// Updates the battery level and charging state.
     func updateBatteryStatus() {
         guard let snapshot = IOPSCopyPowerSourcesInfo()?.takeRetainedValue(),
             let sources = IOPSCopyPowerSourcesList(snapshot)?
@@ -53,11 +79,19 @@ class BatteryManager: ObservableObject {
                     kIOPSPowerSourceStateKey as String] as? String
             {
                 let isAC = (powerSourceState == kIOPSACPowerValue)
+                let level = maxCapacity > 0
+                    ? (currentCapacity * 100) / maxCapacity : 0
 
-                DispatchQueue.main.async {
-                    self.batteryLevel = (currentCapacity * 100) / maxCapacity
+                let publish = { [weak self] in
+                    guard let self else { return }
+                    self.batteryLevel = level
                     self.isCharging = charging
                     self.isPluggedIn = isAC
+                }
+                if Thread.isMainThread {
+                    publish()
+                } else {
+                    DispatchQueue.main.async(execute: publish)
                 }
             }
         }
