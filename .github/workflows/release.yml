@@ -1,0 +1,48 @@
+# Tag-triggered release: build Barik with Xcode (Release, unsigned) on a macOS
+# runner and attach Barik.zip to a GitHub Release. dotnix fetchurl's this zip.
+#
+# Usage: push a tag like `v0.5.1-ut.1` to this repo. The release/tag name = the
+# pushed tag; keep packages/barik/default.nix (in UTshion/dotnix) version + hash
+# in sync with it.
+name: Release Barik
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Barik.app (unsigned Release)
+        run: |
+          set -euo pipefail
+          DERIVED="$RUNNER_TEMP/DerivedData"
+          xcodebuild \
+            -project Barik.xcodeproj \
+            -scheme Barik \
+            -configuration Release \
+            -destination 'generic/platform=macOS' \
+            -derivedDataPath "$DERIVED" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY=- \
+            build
+          APP="$(find "$DERIVED" -name Barik.app -type d -print -quit)"
+          test -d "$APP"
+          ditto -c -k --sequesterRsrc --keepParent "$APP" Barik.zip
+          ls -la Barik.zip
+
+      - name: Create release and upload Barik.zip
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: Barik ${{ github.ref_name }}
+          files: Barik.zip
+          generate_release_notes: true
