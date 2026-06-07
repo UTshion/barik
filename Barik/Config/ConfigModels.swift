@@ -150,7 +150,7 @@ struct TomlWidgetItem: Decodable {
     }
 }
 
-enum TOMLValue: Decodable {
+enum TOMLValue: Decodable, Equatable {
     case string(String)
     case bool(Bool)
     case int(Int)

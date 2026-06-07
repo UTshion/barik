@@ -1,15 +1,27 @@
 import SwiftUI
+import os
+
+private let logger = Logger(
+    subsystem: Bundle.main.bundleIdentifier ?? "app.barik",
+    category: "AppDelegate")
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var backgroundPanel: NSPanel?
     private var menuBarPanel: NSPanel?
 
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        // Hide from Dock and App Switcher so the app runs as a background agent.
+        // Must be set before applicationDidFinishLaunching to take effect reliably.
+        NSApp.setActivationPolicy(.accessory)
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         if let error = ConfigManager.shared.initError {
+            logger.error("Config initialization error: \(error, privacy: .public)")
             showFatalConfigError(message: error)
             return
         }
-        
+
         // Show "What's New" banner if the app version is outdated
         if !VersionChecker.isLatestVersion() {
             VersionChecker.updateVersionFile()
@@ -18,7 +30,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     name: Notification.Name("ShowWhatsNewBanner"), object: nil)
             }
         }
-        
+
         MenuBarPopup.setup()
         setupPanels()
 
@@ -27,9 +39,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             selector: #selector(screenParametersDidChange(_:)),
             name: NSApplication.didChangeScreenParametersNotification,
             object: nil)
+
+        // Re-display panels after the display wakes from sleep.
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self,
+            selector: #selector(screensDidWake(_:)),
+            name: NSWorkspace.screensDidWakeNotification,
+            object: nil)
+
+        // Also handle system-level wake (lid open, etc.) — panels can lose their
+        // level association after a long sleep and silently disappear.
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self,
+            selector: #selector(systemDidWake(_:)),
+            name: NSWorkspace.didWakeNotification,
+            object: nil)
+
+        // Surface main-thread stalls to Console.app for diagnosing freezes.
+        MainThreadStallDetector.shared.start()
+
+        logger.info("Barik launched successfully")
     }
 
     @objc private func screenParametersDidChange(_ notification: Notification) {
+        logger.info("Screen parameters changed, reconfiguring panels")
+        setupPanels()
+    }
+
+    @objc private func screensDidWake(_ notification: Notification) {
+        logger.info("Screens woke from sleep, reconfiguring panels")
+        setupPanels()
+    }
+
+    @objc private func systemDidWake(_ notification: Notification) {
+        logger.info("System woke from sleep, reconfiguring panels")
         setupPanels()
     }
 
@@ -55,6 +98,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     ) {
         if let existingPanel = panel {
             existingPanel.setFrame(frame, display: true)
+            // Re-assert level: after long sleeps macOS can demote panels and
+            // they vanish behind other windows. Re-setting forces the level back.
+            existingPanel.level = NSWindow.Level(rawValue: level)
+            existingPanel.setIsVisible(true)
+            existingPanel.orderFront(nil)
             return
         }
 
@@ -66,19 +114,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         newPanel.level = NSWindow.Level(rawValue: level)
         newPanel.backgroundColor = .clear
         newPanel.hasShadow = false
-        newPanel.collectionBehavior = [.canJoinAllSpaces]
+        newPanel.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
         newPanel.contentView = NSHostingView(rootView: hostingRootView)
         newPanel.orderFront(nil)
         panel = newPanel
     }
-    
+
     private func showFatalConfigError(message: String) {
         let alert = NSAlert()
         alert.messageText = "Configuration Error"
         alert.informativeText = "\(message)\n\nPlease double check ~/.barik-config.toml and try again."
         alert.alertStyle = .critical
         alert.addButton(withTitle: "Quit")
-        
+
         alert.runModal()
         NSApplication.shared.terminate(nil)
     }

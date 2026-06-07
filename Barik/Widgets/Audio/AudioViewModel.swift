@@ -1,9 +1,12 @@
 import AppKit
-import Combine
+import CoreAudio
 import Foundation
-import SwiftUI
 
 /// View model for monitoring and controlling audio input/output devices.
+///
+/// All queries and mutations go through the Core Audio HAL — no subprocesses.
+/// Updates are pushed via Core Audio property listeners, with a coarse safety-net
+/// timer (30s) only to catch missed events.
 class AudioViewModel: ObservableObject {
     @Published var outputVolume: Float = 0.0
     @Published var inputVolume: Float = 0.0
@@ -13,352 +16,241 @@ class AudioViewModel: ObservableObject {
     @Published var selectedInputDevice: AudioDevice?
     @Published var isMuted: Bool = false
 
-    private var timer: Timer?
+    private var globalListeners = CoreAudioListenerToken()
+    private var outputDeviceListeners = CoreAudioListenerToken()
+    private var inputDeviceListeners = CoreAudioListenerToken()
+    private var currentOutputDeviceID: AudioObjectID?
+    private var currentInputDeviceID: AudioObjectID?
+
+    private var safetyTimer: Timer?
 
     init() {
-        startMonitoring()
+        refreshAll()
+        installGlobalListeners()
+        // Safety net: cheap, only invokes property reads — no subprocesses.
+        safetyTimer = Timer.scheduledTimer(withTimeInterval: 30.0, repeats: true) { [weak self] _ in
+            self?.refreshAll()
+        }
     }
 
     deinit {
-        stopMonitoring()
+        safetyTimer?.invalidate()
+        globalListeners.removeAll()
+        outputDeviceListeners.removeAll()
+        inputDeviceListeners.removeAll()
     }
 
-    private func startMonitoring() {
-        updateAudioDevices()
-        updateVolume()
-        
-        timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
-            self?.updateVolume()
-            self?.updateAudioDevices()
+    // MARK: - Listener setup
+
+    private func installGlobalListeners() {
+        // Device list changes (USB plug/unplug, AirPods connect, etc.).
+        globalListeners.add(
+            objectID: AudioObjectID(kAudioObjectSystemObject),
+            selector: kAudioHardwarePropertyDevices
+        ) { [weak self] in
+            DispatchQueue.main.async { self?.refreshDeviceList() }
+        }
+        // Default output device changed (user picked a new device elsewhere).
+        globalListeners.add(
+            objectID: AudioObjectID(kAudioObjectSystemObject),
+            selector: kAudioHardwarePropertyDefaultOutputDevice
+        ) { [weak self] in
+            DispatchQueue.main.async { self?.refreshOutput() }
+        }
+        // Default input device changed.
+        globalListeners.add(
+            objectID: AudioObjectID(kAudioObjectSystemObject),
+            selector: kAudioHardwarePropertyDefaultInputDevice
+        ) { [weak self] in
+            DispatchQueue.main.async { self?.refreshInput() }
         }
     }
 
-    private func stopMonitoring() {
-        timer?.invalidate()
-        timer = nil
+    /// Re-targets the volume/mute listeners to the currently-default output device.
+    private func attachOutputDeviceListeners(_ deviceID: AudioObjectID) {
+        outputDeviceListeners.removeAll()
+        outputDeviceListeners.add(
+            objectID: deviceID,
+            selector: kVirtualMainVolumeSelector,
+            scope: kAudioDevicePropertyScopeOutput
+        ) { [weak self] in
+            DispatchQueue.main.async { self?.refreshOutputVolumeAndMute() }
+        }
+        outputDeviceListeners.add(
+            objectID: deviceID,
+            selector: kAudioDevicePropertyMute,
+            scope: kAudioDevicePropertyScopeOutput
+        ) { [weak self] in
+            DispatchQueue.main.async { self?.refreshOutputVolumeAndMute() }
+        }
     }
 
-    private func updateVolume() {
-        // Get output volume using AppleScript
-        let outputScript = """
-        output volume of (get volume settings)
-        """
-        
-        if let appleScript = NSAppleScript(source: outputScript) {
-            var error: NSDictionary?
-            let result = appleScript.executeAndReturnError(&error)
-            if error == nil, let volumeString = result.stringValue, let volume = Int(volumeString) {
-                outputVolume = Float(volume) / 100.0
-                isMuted = volume == 0
-            } else {
-                // Fallback to NSSound
-                outputVolume = NSSound.systemVolume
+    private func attachInputDeviceListeners(_ deviceID: AudioObjectID) {
+        inputDeviceListeners.removeAll()
+        inputDeviceListeners.add(
+            objectID: deviceID,
+            selector: kVirtualMainVolumeSelector,
+            scope: kAudioDevicePropertyScopeInput
+        ) { [weak self] in
+            DispatchQueue.main.async { self?.refreshInputVolume() }
+        }
+    }
+
+    // MARK: - Refresh routines (all run on main)
+
+    private func refreshAll() {
+        refreshDeviceList()
+        refreshOutput()
+        refreshInput()
+    }
+
+    private func refreshDeviceList() {
+        let ids = CoreAudioHelpers.allDeviceIDs()
+        var outputs: [AudioDevice] = []
+        var inputs: [AudioDevice] = []
+        for id in ids {
+            let name = CoreAudioHelpers.deviceName(id) ?? "Unknown"
+            let uid = CoreAudioHelpers.deviceUID(id) ?? "id-\(id)"
+            if CoreAudioHelpers.deviceHasStreams(id, scope: .output) {
+                outputs.append(
+                    AudioDevice(
+                        id: uid, name: name, type: .output,
+                        audioObjectID: id))
             }
-        } else {
-            // Fallback to NSSound
-            outputVolume = NSSound.systemVolume
-        }
-        
-        // Get input volume using AppleScript
-        let inputScript = """
-        input volume of (get volume settings)
-        """
-        
-        if let appleScript = NSAppleScript(source: inputScript) {
-            var error: NSDictionary?
-            let result = appleScript.executeAndReturnError(&error)
-            if error == nil, let volumeString = result.stringValue, let volume = Int(volumeString) {
-                inputVolume = Float(volume) / 100.0
+            if CoreAudioHelpers.deviceHasStreams(id, scope: .input) {
+                inputs.append(
+                    AudioDevice(
+                        id: uid, name: name, type: .input,
+                        audioObjectID: id))
             }
+        }
+        outputs.sort { $0.name < $1.name }
+        inputs.sort { $0.name < $1.name }
+        self.outputDevices = outputs
+        self.inputDevices = inputs
+
+        // Ensure the selected device still exists.
+        if let selectedOutputDevice,
+           !outputs.contains(where: { $0.id == selectedOutputDevice.id }) {
+            self.selectedOutputDevice = outputs.first(where: {
+                $0.audioObjectID == currentOutputDeviceID
+            }) ?? outputs.first
+        }
+        if let selectedInputDevice,
+           !inputs.contains(where: { $0.id == selectedInputDevice.id }) {
+            self.selectedInputDevice = inputs.first(where: {
+                $0.audioObjectID == currentInputDeviceID
+            }) ?? inputs.first
         }
     }
 
-    private func updateAudioDevices() {
-        // Get all available devices using system_profiler
-        let allOutputs = getAllOutputDevices()
-        let allInputs = getAllInputDevices()
-        
-        outputDevices = allOutputs
-        inputDevices = allInputs
-        
-        // Update selected devices if not set
-        if selectedOutputDevice == nil && !allOutputs.isEmpty {
-            selectedOutputDevice = allOutputs.first
-        } else if let currentOutput = selectedOutputDevice,
-                  !allOutputs.contains(where: { $0.id == currentOutput.id }) {
-            // Current device no longer available, select first
-            selectedOutputDevice = allOutputs.first
+    private func refreshOutput() {
+        guard let deviceID = CoreAudioHelpers.defaultDevice(scope: .output) else {
+            currentOutputDeviceID = nil
+            return
         }
-        
-        if selectedInputDevice == nil && !allInputs.isEmpty {
-            selectedInputDevice = allInputs.first
-        } else if let currentInput = selectedInputDevice,
-                   !allInputs.contains(where: { $0.id == currentInput.id }) {
-            // Current device no longer available, select first
-            selectedInputDevice = allInputs.first
-        }
+        currentOutputDeviceID = deviceID
+        attachOutputDeviceListeners(deviceID)
+        refreshOutputVolumeAndMute()
+        self.selectedOutputDevice = outputDevices.first(where: {
+            $0.audioObjectID == deviceID
+        })
     }
 
-    private func getDefaultOutputDevice() -> AudioDevice? {
-        // Use system_profiler to get default output device
-        let task = Process()
-        task.launchPath = "/usr/sbin/system_profiler"
-        task.arguments = ["SPAudioDataType", "-json"]
-        
-        let pipe = Pipe()
-        task.standardOutput = pipe
-        
-        do {
-            try task.run()
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            task.waitUntilExit()
-            
-            if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let items = json["SPAudioDataType"] as? [[String: Any]] {
-                for item in items {
-                    if let name = item["_name"] as? String,
-                       let coreAudio = item["coreaudio_key"] as? String,
-                       coreAudio.contains("output") {
-                        return AudioDevice(id: coreAudio, name: name, type: .output)
-                    }
-                }
-            }
-        } catch {
-            // Fallback to a simple default
-            return AudioDevice(id: "default", name: "Default Output", type: .output)
+    private func refreshInput() {
+        guard let deviceID = CoreAudioHelpers.defaultDevice(scope: .input) else {
+            currentInputDeviceID = nil
+            return
         }
-        
-        return nil
+        currentInputDeviceID = deviceID
+        attachInputDeviceListeners(deviceID)
+        refreshInputVolume()
+        self.selectedInputDevice = inputDevices.first(where: {
+            $0.audioObjectID == deviceID
+        })
     }
 
-    private func getDefaultInputDevice() -> AudioDevice? {
-        // Similar to output device
-        let task = Process()
-        task.launchPath = "/usr/sbin/system_profiler"
-        task.arguments = ["SPAudioDataType", "-json"]
-        
-        let pipe = Pipe()
-        task.standardOutput = pipe
-        
-        do {
-            try task.run()
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            task.waitUntilExit()
-            
-            if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let items = json["SPAudioDataType"] as? [[String: Any]] {
-                for item in items {
-                    if let name = item["_name"] as? String,
-                       let coreAudio = item["coreaudio_key"] as? String,
-                       coreAudio.contains("input") {
-                        return AudioDevice(id: coreAudio, name: name, type: .input)
-                    }
-                }
-            }
-        } catch {
-            // Fallback
-            return AudioDevice(id: "default", name: "Default Input", type: .input)
-        }
-        
-        return nil
+    private func refreshOutputVolumeAndMute() {
+        guard let id = currentOutputDeviceID else { return }
+        let vol = CoreAudioHelpers.volume(id, scope: .output) ?? 0
+        let muted = CoreAudioHelpers.isMuted(id, scope: .output)
+        self.outputVolume = vol
+        self.isMuted = muted || vol == 0
     }
 
-    private func getAllOutputDevices() -> [AudioDevice] {
-        var devices: [AudioDevice] = []
-        
-        // Use system_profiler to get all output devices
-        let task = Process()
-        task.launchPath = "/usr/sbin/system_profiler"
-        task.arguments = ["SPAudioDataType", "-json"]
-        
-        let pipe = Pipe()
-        task.standardOutput = pipe
-        
-        do {
-            try task.run()
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            task.waitUntilExit()
-            
-            if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let items = json["SPAudioDataType"] as? [[String: Any]] {
-                for item in items {
-                    if let name = item["_name"] as? String {
-                        // Check device type from various fields
-                        let coreAudio = item["coreaudio_key"] as? String ?? ""
-                        let defaultOutput = item["default_output_device"] as? String
-                        let deviceType = item["_type"] as? String ?? ""
-                        
-                        // Determine if it's an output device
-                        let isOutput = coreAudio.lowercased().contains("output") ||
-                                      defaultOutput != nil ||
-                                      deviceType.lowercased().contains("output") ||
-                                      deviceType.lowercased().contains("speaker") ||
-                                      deviceType.lowercased().contains("headphone")
-                        
-                        if isOutput {
-                            let deviceId = coreAudio.isEmpty ? name : coreAudio
-                            devices.append(AudioDevice(id: deviceId, name: name, type: .output))
-                        }
-                    }
-                }
-            }
-        } catch {
-            // Fallback
-            devices.append(AudioDevice(id: "default", name: "Default Output", type: .output))
-        }
-        
-        return devices
+    private func refreshInputVolume() {
+        guard let id = currentInputDeviceID else { return }
+        self.inputVolume = CoreAudioHelpers.volume(id, scope: .input) ?? 0
     }
 
-    private func getAllInputDevices() -> [AudioDevice] {
-        var devices: [AudioDevice] = []
-        
-        // Use system_profiler to get all input devices
-        let task = Process()
-        task.launchPath = "/usr/sbin/system_profiler"
-        task.arguments = ["SPAudioDataType", "-json"]
-        
-        let pipe = Pipe()
-        task.standardOutput = pipe
-        
-        do {
-            try task.run()
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            task.waitUntilExit()
-            
-            if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let items = json["SPAudioDataType"] as? [[String: Any]] {
-                for item in items {
-                    if let name = item["_name"] as? String {
-                        // Check device type from various fields
-                        let coreAudio = item["coreaudio_key"] as? String ?? ""
-                        let defaultInput = item["default_input_device"] as? String
-                        let deviceType = item["_type"] as? String ?? ""
-                        
-                        // Determine if it's an input device
-                        let isInput = coreAudio.lowercased().contains("input") ||
-                                     defaultInput != nil ||
-                                     deviceType.lowercased().contains("input") ||
-                                     deviceType.lowercased().contains("microphone") ||
-                                     deviceType.lowercased().contains("mic")
-                        
-                        if isInput {
-                            let deviceId = coreAudio.isEmpty ? name : coreAudio
-                            devices.append(AudioDevice(id: deviceId, name: name, type: .input))
-                        }
-                    }
-                }
-            }
-        } catch {
-            // Fallback
-            devices.append(AudioDevice(id: "default", name: "Default Input", type: .input))
-        }
-        
-        return devices
-    }
+    // MARK: - Public mutations
 
     func setOutputVolume(_ volume: Float) {
-        let clampedVolume = max(0.0, min(1.0, volume))
-        let volumePercent = Int(clampedVolume * 100)
-        
-        let script = """
-        set volume output volume \(volumePercent)
-        """
-        
-        if let appleScript = NSAppleScript(source: script) {
-            var error: NSDictionary?
-            appleScript.executeAndReturnError(&error)
-            if error == nil {
-                outputVolume = clampedVolume
-                isMuted = clampedVolume == 0
-            }
-        } else {
-            // Fallback
-            NSSound.systemVolume = clampedVolume
-            outputVolume = clampedVolume
-            isMuted = clampedVolume == 0
+        let clamped = max(0, min(1, volume))
+        // Optimistic UI update — the property listener will reconcile if needed.
+        self.outputVolume = clamped
+        self.isMuted = clamped == 0
+        guard let id = currentOutputDeviceID else { return }
+        DispatchQueue.global(qos: .userInitiated).async {
+            CoreAudioHelpers.setVolume(clamped, deviceID: id, scope: .output)
         }
     }
 
     func setInputVolume(_ volume: Float) {
-        // Input volume control requires CoreAudio or AppleScript
-        // For now, we'll use AppleScript
-        let script = """
-        set volume input volume \(Int(volume * 100))
-        """
-        
-        if let appleScript = NSAppleScript(source: script) {
-            var error: NSDictionary?
-            appleScript.executeAndReturnError(&error)
-            if error == nil {
-                inputVolume = volume
-            }
+        let clamped = max(0, min(1, volume))
+        self.inputVolume = clamped
+        guard let id = currentInputDeviceID else { return }
+        DispatchQueue.global(qos: .userInitiated).async {
+            CoreAudioHelpers.setVolume(clamped, deviceID: id, scope: .input)
         }
     }
 
     func selectOutputDevice(_ device: AudioDevice) {
-        // Note: Direct device switching via AppleScript is limited on macOS
-        // We'll open System Preferences to the output tab
-        // Users can then select the device manually
-        openSystemSoundPreferences()
         selectedOutputDevice = device
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let success = CoreAudioHelpers.setDefaultDevice(
+                device.audioObjectID, scope: .output)
+            DispatchQueue.main.async {
+                if !success {
+                    self?.openSystemSoundPreferences()
+                }
+            }
+        }
     }
 
     func selectInputDevice(_ device: AudioDevice) {
-        // Note: Direct device switching via AppleScript is limited on macOS
-        // We'll open System Preferences to the input tab
-        // Users can then select the device manually
-        let script = """
-        tell application "System Preferences"
-            activate
-            reveal anchor "input" of pane id "com.apple.preference.sound"
-        end tell
-        """
-        
-        if let appleScript = NSAppleScript(source: script) {
-            var error: NSDictionary?
-            appleScript.executeAndReturnError(&error)
-        }
-        
         selectedInputDevice = device
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let success = CoreAudioHelpers.setDefaultDevice(
+                device.audioObjectID, scope: .input)
+            DispatchQueue.main.async {
+                if !success {
+                    if let url = URL(string: "x-apple.systempreferences:com.apple.preference.sound?Input") {
+                        NSWorkspace.shared.open(url)
+                    }
+                    _ = self  // silence unused-capture warning
+                }
+            }
+        }
     }
 
     func toggleMute() {
-        isMuted.toggle()
-        let volume = isMuted ? 0.0 : outputVolume
-        setOutputVolume(volume)
+        let newMuted = !isMuted
+        isMuted = newMuted
+        guard let id = currentOutputDeviceID else { return }
+        DispatchQueue.global(qos: .userInitiated).async {
+            // Try the hardware mute first; if the device doesn't support it,
+            // fall back to setting volume to 0 / restoring it.
+            if !CoreAudioHelpers.setMuted(newMuted, deviceID: id, scope: .output) {
+                let target: Float = newMuted ? 0.0 : 0.5
+                CoreAudioHelpers.setVolume(target, deviceID: id, scope: .output)
+            }
+        }
     }
 
     func openSystemSoundPreferences() {
-        // Open System Preferences > Sound (output tab)
-        // On macOS Ventura+, use System Settings instead
-        if #available(macOS 13.0, *) {
-            // macOS Ventura+ uses System Settings
-            let script = """
-            tell application "System Settings"
-                activate
-            end tell
-            """
-            if let appleScript = NSAppleScript(source: script) {
-                var error: NSDictionary?
-                appleScript.executeAndReturnError(&error)
-            }
-            // Open via URL scheme
-            if let url = URL(string: "x-apple.systempreferences:com.apple.preference.sound?Output") {
-                NSWorkspace.shared.open(url)
-            }
-        } else {
-            // macOS Monterey and earlier use System Preferences
-            let script = """
-            tell application "System Preferences"
-                activate
-                reveal anchor "output" of pane id "com.apple.preference.sound"
-            end tell
-            """
-            if let appleScript = NSAppleScript(source: script) {
-                var error: NSDictionary?
-                appleScript.executeAndReturnError(&error)
-            }
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.sound?Output") {
+            NSWorkspace.shared.open(url)
         }
     }
 }
@@ -367,6 +259,7 @@ struct AudioDevice: Identifiable, Equatable {
     let id: String
     let name: String
     let type: AudioDeviceType
+    let audioObjectID: AudioObjectID
 }
 
 enum AudioDeviceType {

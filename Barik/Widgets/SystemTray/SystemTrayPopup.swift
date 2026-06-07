@@ -51,7 +51,8 @@ struct SystemTrayPopup: View {
         }
         .padding(25)
         .background(Color.black)
-        .frame(width: 300, maxHeight: 400)
+        .frame(width: 300)
+        .frame(maxHeight: 400)
     }
 }
 

@@ -1,5 +1,4 @@
 import AppKit
-import Combine
 import CoreGraphics
 import Foundation
 
@@ -57,12 +56,12 @@ class SystemTrayViewModel: ObservableObject {
     }
     
     private func updateTrayItems() {
-        DispatchQueue.global(qos: .background).async {
+        DispatchQueue.global(qos: .background).async { [self] in
             var items: [TrayItem] = []
             
             // Method 1: Use CGWindowListCopyWindowInfo to detect menu bar windows
-            if useWindowDetection {
-                items.append(contentsOf: detectMenuBarWindows())
+            if self.useWindowDetection {
+                items.append(contentsOf: self.detectMenuBarWindows())
             }
             
             // Method 2: Check running applications
@@ -81,7 +80,7 @@ class SystemTrayViewModel: ObservableObject {
                 }
                 
                 // Check if app is likely to have a menu bar item
-                if shouldShowInTray(appName: appName, bundleId: bundleIdentifier) {
+                if self.shouldShowInTray(appName: appName, bundleId: bundleIdentifier) {
                     if let icon = app.icon {
                         let item = TrayItem(
                             id: bundleIdentifier,

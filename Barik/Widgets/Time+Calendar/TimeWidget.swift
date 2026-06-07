@@ -17,9 +17,13 @@ struct TimeWidget: View {
     }
 
     @State private var currentTime = Date()
-    let calendarManager: CalendarManager
+    @StateObject private var calendarManager: CalendarManager
 
     @State private var rect = CGRect()
+
+    init(calendarManager: CalendarManager) {
+        _calendarManager = StateObject(wrappedValue: calendarManager)
+    }
 
     private let timer = Timer.publish(every: 1, on: .main, in: .common)
         .autoconnect()

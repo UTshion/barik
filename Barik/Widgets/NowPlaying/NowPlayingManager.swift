@@ -1,5 +1,4 @@
 import AppKit
-import Combine
 import Foundation
 
 // MARK: - Playback State
@@ -125,12 +124,22 @@ enum MusicApp: String, CaseIterable {
     var nextTrackCommand: String {
         "tell application \"\(rawValue)\" to next track"
     }
+
+    /// Distributed notification name posted by this app when playback state changes.
+    var playbackStateNotification: Notification.Name {
+        switch self {
+        case .spotify: return Notification.Name("com.spotify.client.PlaybackStateChanged")
+        case .music: return Notification.Name("com.apple.Music.playerInfo")
+        }
+    }
 }
 
 // MARK: - Now Playing Provider
 
 /// Provides functionality to fetch the now playing song and execute playback commands.
 final class NowPlayingProvider {
+
+    private static let scriptTimeout: TimeInterval = 2.0
 
     /// Returns the current playing song from any supported music application.
     static func fetchNowPlaying() -> NowPlayingSong? {
@@ -144,6 +153,9 @@ final class NowPlayingProvider {
 
     /// Returns the now playing song for a specific music application.
     private static func fetchNowPlaying(from app: MusicApp) -> NowPlayingSong? {
+        // Skip the AppleScript subprocess entirely if the app isn't running —
+        // saves a fork/exec on every poll for users without that app installed.
+        guard isAppRunning(app) else { return nil }
         guard let output = runAppleScript(app.nowPlayingScript),
             output != "stopped"
         else {
@@ -159,20 +171,24 @@ final class NowPlayingProvider {
         }
     }
 
-    /// Executes the provided AppleScript and returns the trimmed result.
+    /// Executes the provided AppleScript via the centralized SubprocessRunner.
+    /// Bounded by a 2s timeout to prevent hangs when the music app is unresponsive.
     @discardableResult
     static func runAppleScript(_ script: String) -> String? {
-        guard let appleScript = NSAppleScript(source: script) else {
+        guard let scriptData = script.data(using: .utf8) else { return nil }
+        guard
+            let result = SubprocessRunner.run(
+                executable: "/usr/bin/osascript",
+                arguments: [],
+                stdin: scriptData,
+                timeout: scriptTimeout)
+        else {
             return nil
         }
-        var error: NSDictionary?
-        let outputDescriptor = appleScript.executeAndReturnError(&error)
-        if let error = error {
-            print("AppleScript Error: \(error)")
-            return nil
-        }
-        return outputDescriptor.stringValue?.trimmingCharacters(
-            in: .whitespacesAndNewlines)
+        if result.timedOut { return nil }
+        let output = String(data: result.stdout, encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return output.flatMap { $0.isEmpty ? nil : $0 }
     }
 
     /// Returns the first running music application.
@@ -180,36 +196,69 @@ final class NowPlayingProvider {
         MusicApp.allCases.first { isAppRunning($0) }
     }
 
-    /// Executes a playback command for the active music application.
+    /// Executes a playback command for the active music application on a background thread.
     static func executeCommand(_ command: (MusicApp) -> String) {
         guard let activeApp = activeMusicApp() else { return }
-        _ = runAppleScript(command(activeApp))
+        let script = command(activeApp)
+        DispatchQueue.global(qos: .userInitiated).async {
+            _ = runAppleScript(script)
+        }
     }
 }
 
 // MARK: - Now Playing Manager
 
-/// An observable manager that periodically updates the now playing song.
+/// An observable manager that keeps the now playing song up to date.
+///
+/// Primary update path is event-driven via `DistributedNotificationCenter` — both
+/// Music.app and Spotify post notifications on play/pause/track change. A 1-second
+/// safety-net timer keeps the playback position fresh between events.
 final class NowPlayingManager: ObservableObject {
     static let shared = NowPlayingManager()
 
     @Published private(set) var nowPlaying: NowPlayingSong?
-    private var cancellable: AnyCancellable?
+    private var timer: Timer?
+    private var isUpdating = false
 
     private init() {
-        cancellable = Timer.publish(every: 0.3, on: .main, in: .common)
-            .autoconnect()
-            .sink { [weak self] _ in
-                self?.updateNowPlaying()
-            }
+        // Event-driven refresh.
+        let center = DistributedNotificationCenter.default()
+        for app in MusicApp.allCases {
+            center.addObserver(
+                self,
+                selector: #selector(handlePlaybackNotification),
+                name: app.playbackStateNotification,
+                object: nil)
+        }
+
+        // Coarse safety net so the position keeps advancing in the UI.
+        timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            self?.updateNowPlaying()
+        }
+
+        updateNowPlaying()
+    }
+
+    deinit {
+        DistributedNotificationCenter.default().removeObserver(self)
+        timer?.invalidate()
+    }
+
+    @objc private func handlePlaybackNotification() {
+        updateNowPlaying()
     }
 
     /// Updates the now playing song asynchronously.
+    /// Skips the tick if a previous fetch is still in flight to prevent thread explosion.
     private func updateNowPlaying() {
-        DispatchQueue.global(qos: .background).async {
+        assert(Thread.isMainThread)
+        guard !isUpdating else { return }
+        isUpdating = true
+        DispatchQueue.global(qos: .utility).async {
             let song = NowPlayingProvider.fetchNowPlaying()
             DispatchQueue.main.async { [weak self] in
                 self?.nowPlaying = song
+                self?.isUpdating = false
             }
         }
     }

@@ -4,21 +4,21 @@ class YabaiSpacesProvider: SpacesProvider, SwitchableSpacesProvider {
     typealias SpaceType = YabaiSpace
     let executablePath = ConfigManager.shared.config.yabai.path
 
+    private static let timeout: TimeInterval = 3.0
+
     private func runYabaiCommand(arguments: [String]) -> Data? {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: executablePath)
-        process.arguments = arguments
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        do {
-            try process.run()
-        } catch {
-            print("Yabai error: \(error)")
+        guard
+            let result = SubprocessRunner.run(
+                executable: executablePath,
+                arguments: arguments,
+                timeout: Self.timeout)
+        else {
             return nil
         }
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
-        return data
+        if result.timedOut || result.exitCode != 0 {
+            return nil
+        }
+        return result.stdout
     }
 
     private func fetchSpaces() -> [YabaiSpace]? {
@@ -27,10 +27,8 @@ class YabaiSpacesProvider: SpacesProvider, SwitchableSpacesProvider {
         else {
             return nil
         }
-        let decoder = JSONDecoder()
         do {
-            let spaces = try decoder.decode([YabaiSpace].self, from: data)
-            return spaces
+            return try JSONDecoder().decode([YabaiSpace].self, from: data)
         } catch {
             print("Decode yabai spaces error: \(error)")
             return nil
@@ -43,10 +41,8 @@ class YabaiSpacesProvider: SpacesProvider, SwitchableSpacesProvider {
         else {
             return nil
         }
-        let decoder = JSONDecoder()
         do {
-            let windows = try decoder.decode([YabaiWindow].self, from: data)
-            return windows
+            return try JSONDecoder().decode([YabaiWindow].self, from: data)
         } catch {
             print("Decode yabai windows error: \(error)")
             return nil

@@ -1,11 +1,11 @@
 import AppKit
-import Combine
 import Foundation
 
 class SpacesViewModel: ObservableObject {
     @Published var spaces: [AnySpace] = []
     private var timer: Timer?
     private var provider: AnySpacesProvider?
+    private var isLoading = false
 
     init() {
         let runningApps = NSWorkspace.shared.runningApplications.compactMap {
@@ -19,14 +19,29 @@ class SpacesViewModel: ObservableObject {
             provider = nil
         }
         startMonitoring()
+
+        // Refresh immediately when the user switches spaces — avoids waiting for the next tick.
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self,
+            selector: #selector(handleActiveSpaceChange),
+            name: NSWorkspace.activeSpaceDidChangeNotification,
+            object: nil)
     }
 
     deinit {
         stopMonitoring()
+        NSWorkspace.shared.notificationCenter.removeObserver(self)
+    }
+
+    @objc private func handleActiveSpaceChange() {
+        loadSpaces()
     }
 
     private func startMonitoring() {
-        timer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) {
+        // 0.5s is the safety-net tick. Space switches fire activeSpaceDidChange
+        // immediately, so this only catches things like window-list changes
+        // that don't post notifications.
+        timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) {
             [weak self] _ in
             self?.loadSpaces()
         }
@@ -39,26 +54,23 @@ class SpacesViewModel: ObservableObject {
     }
 
     private func loadSpaces() {
-        DispatchQueue.global(qos: .background).async {
-            guard let provider = self.provider,
-                let spaces = provider.getSpacesWithWindows()
-            else {
-                DispatchQueue.main.async {
-                    self.spaces = []
-                }
-                return
-            }
-            // Sort spaces numerically by ID (workspace number)
-            let sortedSpaces = spaces.sorted { space1, space2 in
-                // Try to parse as integers for numeric sorting
+        // isLoading is read/written only on main — no race.
+        assert(Thread.isMainThread)
+        guard !isLoading else { return }
+        guard let provider = provider else { return }
+        isLoading = true
+        DispatchQueue.global(qos: .utility).async {
+            let fetched = provider.getSpacesWithWindows()
+            let sortedSpaces: [AnySpace] = (fetched ?? []).sorted { space1, space2 in
                 if let id1 = Int(space1.id), let id2 = Int(space2.id) {
                     return id1 < id2
                 }
-                // Fallback to string comparison if not numeric
                 return space1.id < space2.id
             }
-            DispatchQueue.main.async {
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
                 self.spaces = sortedSpaces
+                self.isLoading = false
             }
         }
     }
