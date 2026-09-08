@@ -36,10 +36,26 @@ class HidingPanel: NSPanel, NSWindowDelegate {
 class MenuBarPopup {
     static var lastContentIdentifier: String? = nil
 
+    /// The screen the popup is currently anchored to. Used by
+    /// `MenuBarPopupView` to keep the popup within that display's bounds.
+    static var currentScreen: NSScreen?
+
     static func show<Content: View>(
         rect: CGRect, id: String, @ViewBuilder content: @escaping () -> Content
     ) {
         guard let panel = panel else { return }
+
+        // Anchor the popup to whichever display holds the triggering widget so
+        // it renders correctly in multi-monitor setups.
+        let anchorPoint = CGPoint(x: rect.midX, y: rect.midY)
+        let targetScreen =
+            NSScreen.screens.first(where: { $0.frame.contains(anchorPoint) })
+            ?? NSScreen.main
+        currentScreen = targetScreen
+        if let targetScreen {
+            panel.setFrame(targetScreen.visibleFrame, display: true)
+        }
+        let originX = targetScreen?.frame.minX ?? 0
 
         if panel.isKeyWindow, lastContentIdentifier == id {
             NotificationCenter.default.post(name: .willHideWindow, object: nil)
@@ -77,7 +93,7 @@ class MenuBarPopup {
                             MenuBarPopupView {
                                 content()
                             }
-                            .position(x: rect.midX)
+                            .position(x: rect.midX - originX)
                         }
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                         .id(UUID())
@@ -95,7 +111,7 @@ class MenuBarPopup {
                         MenuBarPopupView {
                             content()
                         }
-                        .position(x: rect.midX)
+                        .position(x: rect.midX - originX)
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             )

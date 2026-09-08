@@ -16,6 +16,9 @@
     "+%lld" : {
 
     },
+    "All Displays" : {
+
+    },
     "ALL_DAY" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -264,6 +267,9 @@
           }
         }
       }
+    },
+    "Displays" : {
+
     },
     "EMPTY_EVENTS" : {
       "extractionState" : "manual",
@@ -517,6 +523,9 @@
         }
       }
     },
+    "Main Display Only" : {
+
+    },
     "Noise: %lld" : {
       "localizations" : {
         "ar" : {
@@ -640,6 +649,18 @@
           }
         }
       }
+    },
+    "Quit Barik" : {
+
+    },
+    "Refresh usage" : {
+
+    },
+    "Resets %@" : {
+
+    },
+    "Restart Barik" : {
+
     },
     "RSSI: %lld" : {
       "localizations" : {
@@ -1386,6 +1407,9 @@
           }
         }
       }
+    },
+    "Usage" : {
+
     },
     "v%@ Changelog" : {
       "localizations" : {

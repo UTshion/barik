@@ -5,7 +5,10 @@ struct MenuBarPopupView<Content: View>: View {
     let isPreview: Bool
 
     @ObservedObject var configManager = ConfigManager.shared
-    var foregroundHeight: CGFloat { configManager.config.experimental.foreground.resolveHeight() }
+    var foregroundHeight: CGFloat {
+        configManager.config.experimental.foreground.resolveHeight(
+            for: MenuBarPopup.currentScreen)
+    }
 
     @State private var contentHeight: CGFloat = 0
     @State private var viewFrame: CGRect = .zero
@@ -136,7 +139,8 @@ struct MenuBarPopupView<Content: View>: View {
     }
 
     var computedOffset: CGFloat {
-        let screenWidth = NSScreen.main?.frame.width ?? 0
+        let screenWidth =
+            (MenuBarPopup.currentScreen ?? NSScreen.main)?.frame.width ?? 0
         let W = viewFrame.width
         let M = viewFrame.midX
         let newLeft = (M - W / 2) - 20
