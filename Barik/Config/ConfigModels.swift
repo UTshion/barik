@@ -294,11 +294,14 @@ struct ForegroundConfig: Decodable {
         case spacing
     }
     
-    func resolveHeight() -> CGFloat {
+    func resolveHeight(for screen: NSScreen? = nil) -> CGFloat {
         switch height {
         case .barikDefault:
             return CGFloat(Constants.menuBarHeight)
         case .menuBar:
+            if let screen {
+                return screen.barikMenuBarHeight
+            }
             return NSApplication.shared.mainMenu.map({ CGFloat($0.menuBarHeight) }) ?? 0
         case .float(let value):
             return CGFloat(value)
@@ -368,11 +371,14 @@ struct BackgroundConfig: Decodable {
         case displayed, height, blur
     }
 
-    func resolveHeight() -> CGFloat? {
+    func resolveHeight(for screen: NSScreen? = nil) -> CGFloat? {
         switch height {
         case .barikDefault:
             return nil
         case .menuBar:
+            if let screen {
+                return screen.barikMenuBarHeight
+            }
             return NSApplication.shared.mainMenu.map({ CGFloat($0.menuBarHeight) }) ?? 0
         case .float(let value):
             return CGFloat(value)

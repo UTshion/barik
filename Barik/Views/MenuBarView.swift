@@ -2,6 +2,19 @@ import SwiftUI
 
 struct MenuBarView: View {
     @ObservedObject var configManager = ConfigManager.shared
+    @ObservedObject var displayStore = DisplaySelectionStore.shared
+
+    /// The display this bar instance is rendered on, used to size the bar to
+    /// that screen's system menu bar height. `nil` falls back to the main screen.
+    var displayKey: String? = nil
+
+    /// Resolves the current `NSScreen` for `displayKey` live, so resolution
+    /// changes are picked up even when the hosting panel is reused.
+    private var screen: NSScreen? {
+        guard let displayKey else { return NSScreen.main }
+        return NSScreen.screens.first { $0.barikDisplayKey == displayKey }
+            ?? NSScreen.main
+    }
 
     var body: some View {
         let theme: ColorScheme? =
@@ -29,11 +42,48 @@ struct MenuBarView: View {
             }
         }
         .foregroundStyle(Color.foregroundOutside)
-        .frame(height: max(configManager.config.experimental.foreground.resolveHeight(), 1.0))
+        .frame(height: max(configManager.config.experimental.foreground.resolveHeight(for: screen), 1.0))
         .frame(maxWidth: .infinity)
         .padding(.horizontal, configManager.config.experimental.foreground.horizontalPadding)
         .background(.black.opacity(0.001))
         .preferredColorScheme(theme)
+        .contextMenu { barikContextMenu }
+    }
+
+    /// Right-click menu on Barik's own bar: display selection plus
+    /// restart/quit. Barik covers the native menu bar, so this is the reliable
+    /// way to reach these controls.
+    @ViewBuilder
+    private var barikContextMenu: some View {
+        let store = DisplaySelectionStore.shared
+
+        Menu("Displays") {
+            Toggle(
+                "All Displays",
+                isOn: Binding(
+                    get: { store.mode == .all },
+                    set: { if $0 { store.mode = .all } }))
+            Toggle(
+                "Main Display Only",
+                isOn: Binding(
+                    get: { store.mode == .main },
+                    set: { if $0 { store.mode = .main } }))
+
+            Divider()
+
+            ForEach(NSScreen.screens, id: \.barikDisplayKey) { screen in
+                Toggle(
+                    screen.localizedName,
+                    isOn: Binding(
+                        get: { store.isTargeted(screen) },
+                        set: { _ in store.toggle(screen.barikDisplayKey) }))
+            }
+        }
+
+        Divider()
+
+        Button("Restart Barik") { BarikAppControl.restart() }
+        Button("Quit Barik") { BarikAppControl.quit() }
     }
 
     @ViewBuilder
@@ -47,6 +97,9 @@ struct MenuBarView: View {
 
         case "default.network":
             NetworkWidget().environmentObject(config)
+
+        case "default.usage":
+            UsageWidget().environmentObject(config)
 
         case "default.battery":
             BatteryWidget().environmentObject(config)
