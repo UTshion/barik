@@ -98,6 +98,9 @@ struct MenuBarView: View {
         case "default.network":
             NetworkWidget().environmentObject(config)
 
+        case "default.usage":
+            UsageWidget().environmentObject(config)
+
         case "default.battery":
             BatteryWidget().environmentObject(config)
 
