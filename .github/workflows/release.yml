@@ -1,9 +1,16 @@
 # Tag-triggered release: build Barik with Xcode (Release, unsigned) on a macOS
-# runner and attach Barik.zip to a GitHub Release. dotnix fetchurl's this zip.
+# runner, attach Barik.zip to a GitHub Release, then bump release.json on main
+# with the new version/url/sha256 so this repo's flake installs the fresh
+# artifact.
 #
-# Usage: push a tag like `v0.5.1-ut.1` to this repo. The release/tag name = the
-# pushed tag; keep packages/barik/default.nix (in UTshion/dotnix) version + hash
-# in sync with it.
+# Usage: push a tag like `v0.5.1-ut.2`. Consumers (e.g. UTshion/dotnix, which
+# takes this repo as a flake input) then just run
+# `nix flake lock --update-input barik` — no manual hash bookkeeping.
+#
+# Why the post-release commit: the flake at the tagged commit cannot contain the
+# hash of an artifact built *from* that commit (chicken-and-egg), so the flake
+# always points at the latest *published* release via release.json, and CI moves
+# that pointer after uploading.
 name: Release Barik
 
 on:
@@ -46,3 +53,22 @@ jobs:
           name: Barik ${{ github.ref_name }}
           files: Barik.zip
           generate_release_notes: true
+
+      # Safe against workflow loops: this workflow only triggers on tag pushes,
+      # and the bump commit is a plain branch push.
+      - name: Point release.json at this release (commit to main)
+        run: |
+          set -euo pipefail
+          HASH="sha256-$(openssl dgst -sha256 -binary Barik.zip | base64)"
+          VERSION="${GITHUB_REF_NAME#v}"
+          URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/Barik.zip"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git fetch origin main
+          git checkout -B main origin/main
+          jq --arg v "$VERSION" --arg u "$URL" --arg h "$HASH" \
+            '.version = $v | .url = $u | .hash = $h' release.json > release.json.tmp
+          mv release.json.tmp release.json
+          git add release.json
+          git commit -m "release: point release.json at ${GITHUB_REF_NAME}"
+          git push origin main
