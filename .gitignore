@@ -219,3 +219,6 @@ xcuserdata/
 #
 # Nix build output symlink
 result
+
+# Nix flake lock must be versioned (reproducible flake consumption)
+!flake.lock
