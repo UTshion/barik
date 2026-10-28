@@ -7,9 +7,11 @@
 # version/url/hash come from ../release.json, which the release workflow bumps
 # on main right after uploading the artifact.
 #
-# The app is unsigned (CI builds with CODE_SIGNING_ALLOWED=NO). fetchurl does
-# not set com.apple.quarantine, so Gatekeeper quarantine is not triggered for
-# store paths; if macOS ever objects, ad-hoc sign in installPhase (codesign -s -).
+# CI builds with CODE_SIGNING_ALLOWED=NO and then ad-hoc signs the whole bundle
+# (codesign --deep -s -) so TCC permission grants stick across launches. Each
+# new release has a new code hash, so macOS may ask once more after updating.
+# fetchurl does not set com.apple.quarantine, so Gatekeeper quarantine is not
+# triggered for store paths.
 {
   lib,
   stdenvNoCC,
