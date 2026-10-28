@@ -23,6 +23,8 @@ nonisolated protocol SpacesProvider: Sendable {
     @concurrent func getSpacesWithWindows() async -> [AnySpace]?
     @concurrent func focusSpace(spaceId: String, needWindowFocus: Bool) async
     @concurrent func focusWindow(windowId: String) async
+    /// Moves every window of `first` into `second` and vice versa.
+    @concurrent func swapSpaces(_ first: AnySpace, _ second: AnySpace) async
 }
 
 nonisolated struct AnyWindow: Identifiable, Equatable, Sendable {
@@ -43,6 +45,12 @@ nonisolated struct AnySpace: Identifiable, Equatable, Sendable {
     let id: String
     let isFocused: Bool
     let windows: [AnyWindow]
+
+    init(id: String, isFocused: Bool, windows: [AnyWindow]) {
+        self.id = id
+        self.isFocused = isFocused
+        self.windows = windows
+    }
 
     init<S: SpaceModel>(_ space: S) {
         self.id = space.spaceId

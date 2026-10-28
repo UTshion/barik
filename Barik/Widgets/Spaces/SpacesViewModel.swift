@@ -20,6 +20,11 @@ final class SpacesViewModel {
     /// issued them. Otherwise a later `workspace` command could land after
     /// `focus --window-id` and steal focus back from the clicked window.
     @ObservationIgnored private var lastCommand: Task<Void, Never>?
+    /// Commands queued but not yet finished. While non-zero, polled results
+    /// are dropped so a half-applied swap doesn't flash in the bar.
+    @ObservationIgnored private var pendingCommands = 0
+    /// Bumped per command; a fetch that started before a command is stale.
+    @ObservationIgnored private var commandGeneration = 0
 
     init() {
         let runningApps = NSWorkspace.shared.runningApplications.compactMap {
@@ -82,13 +87,14 @@ final class SpacesViewModel {
     // MARK: - Loading
 
     private func refresh() {
-        guard !isLoading, let provider else { return }
+        guard !isLoading, pendingCommands == 0, let provider else { return }
         isLoading = true
+        let generation = commandGeneration
         Task {
             defer { isLoading = false }
-            guard let fetched = await provider.getSpacesWithWindows() else {
-                return
-            }
+            guard let fetched = await provider.getSpacesWithWindows(),
+                generation == commandGeneration, pendingCommands == 0
+            else { return }
             let sorted = fetched.sorted { lhs, rhs in
                 if let l = Int(lhs.id), let r = Int(rhs.id) { return l < r }
                 return lhs.id < rhs.id
@@ -115,15 +121,50 @@ final class SpacesViewModel {
         }
     }
 
+    /// Swaps the windows of two spaces. The bar updates optimistically so the
+    /// drop feels instant; the next refresh reconciles with the real state.
+    func swapSpaces(_ first: AnySpace, _ second: AnySpace) {
+        guard first.id != second.id else { return }
+        let focusedMoves =
+            first.windows.contains(where: \.isFocused)
+            || second.windows.contains(where: \.isFocused)
+        spaces = spaces.map { space in
+            switch space.id {
+            case first.id:
+                AnySpace(
+                    id: first.id,
+                    isFocused: focusedMoves
+                        ? second.windows.contains(where: \.isFocused)
+                        : first.isFocused,
+                    windows: second.windows)
+            case second.id:
+                AnySpace(
+                    id: second.id,
+                    isFocused: focusedMoves
+                        ? first.windows.contains(where: \.isFocused)
+                        : second.isFocused,
+                    windows: first.windows)
+            default:
+                space
+            }
+        }
+        enqueue { provider in
+            await provider.swapSpaces(first, second)
+        }
+    }
+
     private func enqueue(
         _ command: @escaping @Sendable (any SpacesProvider) async -> Void
     ) {
         guard let provider else { return }
         let previous = lastCommand
+        pendingCommands += 1
+        commandGeneration += 1
         lastCommand = Task {
             await previous?.value
             await command(provider)
-            // Reflect the new focus right away.
+            pendingCommands -= 1
+            // Reflect the new state right away.
             refresh()
         }
     }
