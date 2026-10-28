@@ -9,6 +9,15 @@ struct SpacesWidget: View {
     /// X coordinate of this widget's leading edge in screen/global coordinates.
     @State private var widgetOriginX: CGFloat = 0
 
+    // MARK: Drag-to-reorder state
+
+    private static let rowSpace = "barik.spaces.row"
+    /// Frames of each space in the row's coordinate space, keyed by space ID.
+    @State private var spaceFrames: [String: CGRect] = [:]
+    @State private var draggedSpaceId: String?
+    @State private var dragOffset: CGFloat = 0
+    @State private var dropTargetId: String?
+
     /// Maximum width this widget may occupy without entering the notch area.
     /// Nil means no constraint (non-notched screens or no detected notch apps).
     private var maxAvailableWidth: CGFloat? {
@@ -63,11 +72,62 @@ struct SpacesWidget: View {
     private func spacesRow() -> some View {
         HStack(spacing: foregroundHeight < 30 ? 0 : 8) {
             ForEach(viewModel.spaces) { space in
+                let isDragged = draggedSpaceId == space.id
                 SpaceView(space: space)
                     .id(space.id)  // Required for ScrollViewReader.scrollTo(_:)
+                    .onGeometryChange(for: CGRect.self) {
+                        $0.frame(in: .named(Self.rowSpace))
+                    } action: {
+                        spaceFrames[space.id] = $0
+                    }
+                    .overlay {
+                        if dropTargetId == space.id {
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .strokeBorder(Color.foreground.opacity(0.8), lineWidth: 1.5)
+                        }
+                    }
+                    .offset(x: isDragged ? dragOffset : 0)
+                    .scaleEffect(isDragged ? 1.05 : 1)
+                    .opacity(isDragged ? 0.85 : 1)
+                    .zIndex(isDragged ? 1 : 0)
+                    // Taps on the space/window take precedence; the drag only
+                    // begins once the pointer has moved a few points.
+                    .gesture(reorderGesture(for: space))
             }
         }
+        .coordinateSpace(.named(Self.rowSpace))
         .experimentalConfiguration(horizontalPadding: 5, cornerRadius: 10)
+    }
+
+    // MARK: - Drag to reorder
+
+    /// Dragging a space onto another one swaps their windows, which reorders
+    /// the workspaces as shown in the bar.
+    private func reorderGesture(for space: AnySpace) -> some Gesture {
+        DragGesture(minimumDistance: 6, coordinateSpace: .named(Self.rowSpace))
+            .onChanged { value in
+                draggedSpaceId = space.id
+                dragOffset = value.translation.width
+                let x = value.location.x
+                let target = spaceFrames.first { id, frame in
+                    id != space.id && frame.minX <= x && x <= frame.maxX
+                }?.key
+                if target != dropTargetId {
+                    withAnimation(.smooth(duration: 0.15)) { dropTargetId = target }
+                }
+            }
+            .onEnded { _ in
+                if let targetId = dropTargetId,
+                    let target = viewModel.spaces.first(where: { $0.id == targetId })
+                {
+                    viewModel.swapSpaces(space, target)
+                }
+                withAnimation(.smooth(duration: 0.25)) {
+                    draggedSpaceId = nil
+                    dragOffset = 0
+                    dropTargetId = nil
+                }
+            }
     }
 }
 

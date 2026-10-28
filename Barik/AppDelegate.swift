@@ -13,6 +13,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private var statusItem: NSStatusItem?
     private weak var displaysMenu: NSMenu?
+    private weak var statusMenu: NSMenu?
+    private weak var loginMenuItem: NSMenuItem?
 
     func applicationWillFinishLaunching(_ notification: Notification) {
         // Hide from Dock and App Switcher so the app runs as a background agent.
@@ -39,6 +41,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         MenuBarPopup.setup()
         setupStatusItem()
         setupPanels()
+        LoginItem.registerByDefaultIfNeeded()
 
         NotificationCenter.default.addObserver(
             self,
@@ -206,6 +209,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         menu.addItem(.separator())
 
+        let loginItem = NSMenuItem(
+            title: "Launch at Login", action: #selector(toggleLaunchAtLogin),
+            keyEquivalent: "")
+        loginItem.target = self
+        menu.addItem(loginItem)
+        self.loginMenuItem = loginItem
+
+        menu.addItem(.separator())
+
         let restartItem = NSMenuItem(
             title: "Restart Barik", action: #selector(restartBarik),
             keyEquivalent: "r")
@@ -218,12 +230,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         quitItem.target = self
         menu.addItem(quitItem)
 
+        menu.delegate = self
+        self.statusMenu = menu
         return menu
     }
 
     /// Rebuilds the Displays submenu each time it opens so it reflects the
     /// currently connected screens and the active selection.
     func menuNeedsUpdate(_ menu: NSMenu) {
+        if menu === statusMenu {
+            loginMenuItem?.state = LoginItem.isEnabled ? .on : .off
+            return
+        }
         guard menu === displaysMenu else { return }
         menu.removeAllItems()
 
@@ -267,6 +285,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func toggleDisplay(_ sender: NSMenuItem) {
         guard let key = sender.representedObject as? String else { return }
         DisplaySelectionStore.shared.toggle(key)
+    }
+
+    @objc private func toggleLaunchAtLogin() {
+        LoginItem.toggle()
     }
 
     @objc private func quitBarik() {

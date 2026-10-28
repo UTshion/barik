@@ -1,4 +1,4 @@
-# Tag-triggered release: build Barik with Xcode (Release, unsigned) on a macOS
+# Tag-triggered release: build Barik with Xcode (Release, ad-hoc signed) on a macOS
 # runner, attach Barik.zip to a GitHub Release, then bump release.json on main
 # with the new version/url/sha256 so this repo's flake installs the fresh
 # artifact.
@@ -27,7 +27,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build Barik.app (unsigned Release)
+      - name: Build Barik.app (ad-hoc signed Release)
         run: |
           set -euo pipefail
           DERIVED="$RUNNER_TEMP/DerivedData"
@@ -43,6 +43,13 @@ jobs:
             build
           APP="$(find "$DERIVED" -name Barik.app -type d -print -quit)"
           test -d "$APP"
+          # Seal the whole bundle with an ad-hoc signature. Without it only the
+          # Mach-O carries the linker's ad-hoc signature, the bundle itself is
+          # "not signed at all", and TCC can't reliably match the app to its
+          # saved grants — so Calendar/Location/Automation access is asked for
+          # again on every launch. No certificate is needed for this.
+          codesign --force --deep --sign - "$APP"
+          codesign --verify --deep --strict --verbose=2 "$APP"
           ditto -c -k --sequesterRsrc --keepParent "$APP" Barik.zip
           ls -la Barik.zip
 

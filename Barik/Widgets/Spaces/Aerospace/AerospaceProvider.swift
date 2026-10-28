@@ -66,6 +66,27 @@ nonisolated final class AerospaceSpacesProvider: SpacesProvider {
         _ = await run(["focus", "--window-id", windowId])
     }
 
+    @concurrent func swapSpaces(_ first: AnySpace, _ second: AnySpace) async {
+        // Snapshot both window lists before moving anything, otherwise the
+        // second pass would move the first space's windows straight back.
+        for window in first.windows {
+            _ = await run([
+                "move-node-to-workspace", "--window-id", String(window.id),
+                second.id,
+            ])
+        }
+        for window in second.windows {
+            _ = await run([
+                "move-node-to-workspace", "--window-id", String(window.id),
+                first.id,
+            ])
+        }
+        // Keep focus on the window the user was working in, wherever it went.
+        if let focused = (first.windows + second.windows).first(where: \.isFocused) {
+            _ = await run(["focus", "--window-id", String(focused.id)])
+        }
+    }
+
     private func run(_ arguments: [String]) async -> Data? {
         guard
             let result = await SubprocessRunner.run(

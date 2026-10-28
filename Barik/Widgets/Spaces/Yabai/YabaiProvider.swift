@@ -37,6 +37,20 @@ nonisolated final class YabaiSpacesProvider: SpacesProvider {
         _ = await run(["-m", "window", "--focus", windowId])
     }
 
+    @concurrent func swapSpaces(_ first: AnySpace, _ second: AnySpace) async {
+        // Moving windows works without yabai's scripting addition, unlike
+        // `space --swap`.
+        for window in first.windows {
+            _ = await run(["-m", "window", String(window.id), "--space", second.id])
+        }
+        for window in second.windows {
+            _ = await run(["-m", "window", String(window.id), "--space", first.id])
+        }
+        if let focused = (first.windows + second.windows).first(where: \.isFocused) {
+            _ = await run(["-m", "window", "--focus", String(focused.id)])
+        }
+    }
+
     private func fetchSpacesWithWindows() async -> [YabaiSpace]? {
         async let spacesTask: [YabaiSpace]? = decode(
             ["-m", "query", "--spaces"])
