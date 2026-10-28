@@ -1,73 +1,72 @@
 import SwiftUI
 
-/// Widget for displaying system tray (menu bar) applications.
+/// Widget for displaying other apps' menu bar extras (status items).
 struct SystemTrayWidget: View {
     @EnvironmentObject var configProvider: ConfigProvider
-    @StateObject private var viewModel = SystemTrayViewModel()
+    @State private var viewModel = SystemTrayViewModel()
     @State private var rect: CGRect = .zero
-    
+
+    private let maxInlineItems = 10
+
     var body: some View {
-        if !viewModel.trayItems.isEmpty {
-            HStack(spacing: 6) {
-                ForEach(viewModel.trayItems.prefix(10)) { item in
-                    Button(action: {
-                        viewModel.openApp(item)
-                    }) {
-                        Image(nsImage: item.icon)
-                            .resizable()
-                            .scaledToFit()
-                            .frame(width: 14, height: 14)
+        HStack(spacing: 6) {
+            if !viewModel.isTrusted {
+                Button {
+                    viewModel.openAccessibilitySettings()
+                } label: {
+                    Image(systemName: "lock.shield")
+                        .font(.system(size: 12))
+                }
+                .buttonStyle(.plain)
+                .help("Barik needs Accessibility access to show menu bar items")
+            } else {
+                ForEach(viewModel.trayItems.prefix(maxInlineItems)) { item in
+                    Button {
+                        viewModel.press(item)
+                    } label: {
+                        Group {
+                            if let icon = viewModel.icon(for: item) {
+                                Image(nsImage: icon)
+                                    .resizable()
+                                    .scaledToFit()
+                            } else {
+                                Image(systemName: "app")
+                                    .resizable()
+                                    .scaledToFit()
+                            }
+                        }
+                        .frame(width: 14, height: 14)
                     }
-                    .buttonStyle(PlainButtonStyle())
+                    .buttonStyle(.plain)
                     .help(item.name)
                 }
-                
-                if viewModel.trayItems.count > 10 {
-                    Button(action: {
+
+                if viewModel.trayItems.count > maxInlineItems {
+                    Button {
                         MenuBarPopup.show(rect: rect, id: "systemtray") {
                             SystemTrayPopup(viewModel: viewModel)
                         }
-                    }) {
-                        Text("+\(viewModel.trayItems.count - 10)")
+                    } label: {
+                        Text("+\(viewModel.trayItems.count - maxInlineItems)")
                             .font(.system(size: 10))
                             .foregroundColor(.foregroundOutside)
                     }
-                    .buttonStyle(PlainButtonStyle())
+                    .buttonStyle(.plain)
                 }
-            }
-            .background(
-                GeometryReader { geometry in
-                    Color.clear
-                        .onAppear { rect = geometry.frame(in: .global) }
-                        .onChange(of: geometry.frame(in: .global)) { _, newValue in
-                            rect = newValue
-                        }
-                }
-            )
-            .contentShape(Rectangle())
-            .experimentalConfiguration(cornerRadius: 15)
-            .frame(maxHeight: .infinity)
-            .background(.black.opacity(0.001))
-            .onTapGesture {
-                MenuBarPopup.show(rect: rect, id: "systemtray") {
-                    SystemTrayPopup(viewModel: viewModel)
-                }
-            }
-            .onAppear {
-                // Update viewModel with config
-                viewModel.updateConfig(configProvider.config)
-            }
-            .onChange(of: configProvider.config) { _, newConfig in
-                viewModel.updateConfig(newConfig)
             }
         }
-    }
-}
-
-struct SystemTrayWidget_Previews: PreviewProvider {
-    static var previews: some View {
-        SystemTrayWidget()
-            .frame(width: 200, height: 100)
-            .background(Color.black)
+        .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: {
+            rect = $0
+        }
+        .experimentalConfiguration(cornerRadius: 15)
+        .frame(maxHeight: .infinity)
+        .onAppear {
+            viewModel.updateConfig(configProvider.config)
+            viewModel.start()
+        }
+        .onDisappear { viewModel.stop() }
+        .onChange(of: configProvider.config) { _, newConfig in
+            viewModel.updateConfig(newConfig)
+        }
     }
 }

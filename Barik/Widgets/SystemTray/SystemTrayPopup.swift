@@ -2,7 +2,7 @@ import SwiftUI
 
 /// Popup window showing all system tray applications.
 struct SystemTrayPopup: View {
-    @ObservedObject var viewModel: SystemTrayViewModel
+    let viewModel: SystemTrayViewModel
     
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -24,10 +24,10 @@ struct SystemTrayPopup: View {
                     VStack(alignment: .leading, spacing: 12) {
                         ForEach(viewModel.trayItems) { item in
                             Button(action: {
-                                viewModel.openApp(item)
+                                viewModel.press(item)
                             }) {
                                 HStack(spacing: 12) {
-                                    Image(nsImage: item.icon)
+                                    Image(nsImage: viewModel.icon(for: item) ?? NSImage())
                                         .resizable()
                                         .scaledToFit()
                                         .frame(width: 24, height: 24)
