@@ -10,8 +10,8 @@ import os
 ///    SIGTERM'd then SIGKILL'd.
 /// 3. Thread explosion — a global semaphore caps concurrent subprocesses, preventing
 ///    GCD worker thread exhaustion that previously froze the app.
-enum SubprocessRunner {
-    struct Result {
+nonisolated enum SubprocessRunner {
+    struct Result: Sendable {
         let stdout: Data
         let stderr: Data
         let exitCode: Int32
@@ -130,25 +130,27 @@ enum SubprocessRunner {
             timedOut: timedOut)
     }
 
-    /// Convenience: run on the dedicated background queue and deliver the result on `completion`'s queue.
-    static func runAsync(
+    /// Async variant for Swift concurrency callers. The blocking wait happens on
+    /// the runner's dedicated queue, never on the cooperative thread pool.
+    static func run(
         executable: String,
         arguments: [String],
         stdin: Data? = nil,
-        timeout: TimeInterval,
-        completion: @escaping (Result?) -> Void
-    ) {
-        queue.async {
-            let result = run(
-                executable: executable, arguments: arguments,
-                stdin: stdin, timeout: timeout)
-            completion(result)
+        timeout: TimeInterval
+    ) async -> Result? {
+        await withCheckedContinuation { continuation in
+            queue.async {
+                let result: Result? = run(
+                    executable: executable, arguments: arguments,
+                    stdin: stdin, timeout: timeout)
+                continuation.resume(returning: result)
+            }
         }
     }
 }
 
 /// Thread-safe Data accumulator. `readabilityHandler` callbacks fire on Foundation-owned threads.
-private final class DataBuffer {
+nonisolated private final class DataBuffer: @unchecked Sendable {
     private let lock = NSLock()
     private var data = Data()
 
