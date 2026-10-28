@@ -1,30 +1,31 @@
 import Foundation
+import Observation
 
-final class AppUpdater: ObservableObject {
-    // Published properties to notify the UI
-    @Published var latestVersion: String?
-    @Published var updateAvailable = false
+/// Checks GitHub for newer Barik releases and installs them on request.
+///
+/// One shared instance serves the update banner on every display, so the
+/// GitHub API is polled once per interval rather than once per bar.
+@MainActor
+@Observable
+final class AppUpdater {
+    static let shared = AppUpdater()
 
-    // Local path for the downloaded update directory
-    private(set) var downloadedUpdatePath: String?
-    // URL for the update asset obtained from GitHub release JSON
-    private var updateAssetURL: URL?
+    private(set) var latestVersion: String?
+    private(set) var updateAvailable = false
 
-    // Timer to schedule periodic update checks
-    private var updateTimer: Timer?
+    /// Local path for the downloaded update directory.
+    @ObservationIgnored private(set) var downloadedUpdatePath: String?
+    /// URL for the update asset obtained from GitHub release JSON.
+    @ObservationIgnored private var updateAssetURL: URL?
 
-    init() {
-        fetchLatestRelease()
-        // Check for updates every 30 minutes
-        updateTimer = Timer.scheduledTimer(
-            withTimeInterval: 1800, repeats: true
-        ) { [weak self] _ in
-            self?.fetchLatestRelease()
+    private init() {
+        // Check now and then every 30 minutes.
+        Task { [weak self] in
+            while !Task.isCancelled {
+                await self?.fetchLatestRelease()
+                try? await Task.sleep(for: .seconds(1800))
+            }
         }
-    }
-
-    deinit {
-        updateTimer?.invalidate()
     }
 
     /// Returns a fallback download URL based on the version string.
@@ -36,50 +37,45 @@ final class AppUpdater: ObservableObject {
         return URL(string: urlString)
     }
 
+    nonisolated private struct Release: Decodable, Sendable {
+        struct Asset: Decodable {
+            let name: String
+            let browserDownloadURL: URL
+
+            enum CodingKeys: String, CodingKey {
+                case name
+                case browserDownloadURL = "browser_download_url"
+            }
+        }
+        let tagName: String
+        let assets: [Asset]
+
+        enum CodingKeys: String, CodingKey {
+            case tagName = "tag_name"
+            case assets
+        }
+    }
+
     /// Fetches the latest release information from GitHub and updates the state.
-    func fetchLatestRelease() {
+    func fetchLatestRelease() async {
         guard
             let url = URL(
                 string:
                     "https://api.github.com/repos/mocki-toki/barik/releases/latest"
             )
         else { return }
-        URLSession.shared.dataTask(with: url) { [weak self] data, _, error in
-            if let error = error {
-                print("Error fetching release info: \(error)")
-                return
-            }
-            guard let data = data,
-                let json = try? JSONSerialization.jsonObject(with: data)
-                    as? [String: Any],
-                let tag = json["tag_name"] as? String
-            else {
-                return
-            }
-
-            // Attempt to extract the asset download URL if available
-            if let assets = json["assets"] as? [[String: Any]] {
-                for asset in assets {
-                    if let name = asset["name"] as? String,
-                        name.hasSuffix(".zip"),
-                        let downloadURLString = asset["browser_download_url"]
-                            as? String,
-                        let assetURL = URL(string: downloadURLString)
-                    {
-                        self?.updateAssetURL = assetURL
-                        break
-                    }
-                }
-            }
-
+        do {
+            let (data, _) = try await URLSession.shared.data(from: url)
+            let release = try JSONDecoder().decode(Release.self, from: data)
+            updateAssetURL =
+                release.assets.first { $0.name.hasSuffix(".zip") }?
+                .browserDownloadURL
             let currentVersion = VersionChecker.currentVersion ?? "0.0.0"
-            let comparisonResult =
-                self?.compareVersion(tag, currentVersion) ?? 0
-            DispatchQueue.main.async {
-                self?.latestVersion = tag
-                self?.updateAvailable = comparisonResult > 0
-            }
-        }.resume()
+            latestVersion = release.tagName
+            updateAvailable = compareVersion(release.tagName, currentVersion) > 0
+        } catch {
+            print("Error fetching release info: \(error)")
+        }
     }
 
     /// Compares two version strings.
@@ -100,99 +96,54 @@ final class AppUpdater: ObservableObject {
     }
 
     /// Downloads and unzips the update archive.
-    /// - Parameters:
-    ///   - version: The latest version string.
-    ///   - completion: Returns the temporary directory URL containing the unzipped app.
-    private func downloadAndUnzip(
-        latest version: String, completion: @escaping (URL?) -> Void
-    ) {
-        let assetURL: URL
-        if let url = updateAssetURL {
-            assetURL = url
-        } else if let fallbackURL = fallbackDownloadURL(for: version) {
-            assetURL = fallbackURL
-        } else {
+    /// - Returns: The temporary directory URL containing the unzipped app.
+    private func downloadAndUnzip(latest version: String) async -> URL? {
+        guard
+            let assetURL = updateAssetURL ?? fallbackDownloadURL(for: version)
+        else {
             print("Invalid update URL")
-            completion(nil)
-            return
+            return nil
         }
 
         print("Downloading update from: \(assetURL.absoluteString)")
-        let downloadTask = URLSession.shared.downloadTask(with: assetURL) {
-            localURL, response, error in
-            if let error = error {
-                print("Update download error: \(error)")
-                completion(nil)
-                return
-            }
-            guard let httpResponse = response as? HTTPURLResponse,
-                httpResponse.statusCode == 200
-            else {
+        do {
+            let (localURL, response) = try await URLSession.shared.download(
+                from: assetURL)
+            guard (response as? HTTPURLResponse)?.statusCode == 200 else {
                 print("Download failed with HTTP error")
-                completion(nil)
-                return
-            }
-            guard let localURL = localURL else {
-                print("No update file found")
-                completion(nil)
-                return
+                return nil
             }
 
             let fileManager = FileManager.default
             let tempDir = fileManager.temporaryDirectory.appendingPathComponent(
                 UUID().uuidString)
-            do {
-                try fileManager.createDirectory(
-                    at: tempDir, withIntermediateDirectories: true,
-                    attributes: nil)
-                let unzipProcess = Process()
-                unzipProcess.executableURL = URL(
-                    fileURLWithPath: "/usr/bin/unzip")
-                unzipProcess.arguments = [
-                    "-o", localURL.path, "-d", tempDir.path,
-                ]
-                try unzipProcess.run()
-                unzipProcess.waitUntilExit()
-
-                let newAppURL = tempDir.appendingPathComponent("Barik.app")
-                if fileManager.fileExists(atPath: newAppURL.path) {
-                    DispatchQueue.main.async {
-                        completion(tempDir)
-                    }
-                } else {
-                    print("Unzipping failed: Barik.app not found in archive")
-                    DispatchQueue.main.async {
-                        completion(nil)
-                    }
-                }
-            } catch {
-                print("Error unzipping update: \(error)")
-                DispatchQueue.main.async {
-                    completion(nil)
-                }
+            try fileManager.createDirectory(
+                at: tempDir, withIntermediateDirectories: true)
+            let result = await SubprocessRunner.run(
+                executable: "/usr/bin/unzip",
+                arguments: ["-o", localURL.path, "-d", tempDir.path],
+                timeout: 120)
+            guard result?.exitCode == 0,
+                fileManager.fileExists(
+                    atPath: tempDir.appendingPathComponent("Barik.app").path)
+            else {
+                print("Unzipping failed: Barik.app not found in archive")
+                return nil
             }
+            return tempDir
+        } catch {
+            print("Update download error: \(error)")
+            return nil
         }
-        downloadTask.resume()
     }
 
     /// Downloads and installs the update immediately.
-    /// - Parameters:
-    ///   - version: The latest version string.
-    ///   - completion: Called when the installation process has been triggered.
-    func downloadAndInstall(
-        latest version: String, completion: @escaping () -> Void
-    ) {
-        downloadAndUnzip(latest: version) { [weak self] tempDir in
-            guard let tempDir = tempDir else {
-                completion()
-                return
-            }
-            self?.downloadedUpdatePath = tempDir.path
-            self?.installUpdate(latest: version)
-            DispatchQueue.main.async {
-                completion()
-            }
+    func downloadAndInstall(latest version: String) async {
+        guard let tempDir = await downloadAndUnzip(latest: version) else {
+            return
         }
+        downloadedUpdatePath = tempDir.path
+        installUpdate(latest: version)
     }
 
     /// Installs the update by replacing the current application.

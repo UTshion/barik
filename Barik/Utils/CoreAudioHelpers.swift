@@ -5,7 +5,7 @@ import Foundation
 /// because the constant isn't bridged into Swift on modern SDKs even though the HAL
 /// still services the selector. Provides a single virtual main volume control that
 /// works on devices without a hardware master element (the common case).
-let kVirtualMainVolumeSelector: AudioObjectPropertySelector =
+nonisolated let kVirtualMainVolumeSelector: AudioObjectPropertySelector =
     (UInt32(UInt8(ascii: "v")) << 24)
     | (UInt32(UInt8(ascii: "m")) << 16)
     | (UInt32(UInt8(ascii: "v")) << 8)
@@ -14,7 +14,7 @@ let kVirtualMainVolumeSelector: AudioObjectPropertySelector =
 /// Thin Swift wrappers over Core Audio HAL (AudioObjectGetPropertyData / SetPropertyData).
 /// Replaces the previous `system_profiler` + `osascript` subprocess path that dominated
 /// our subprocess load and could exhaust GCD's worker thread pool.
-enum CoreAudioHelpers {
+nonisolated enum CoreAudioHelpers {
 
     enum Scope {
         case output, input
@@ -244,7 +244,7 @@ enum CoreAudioHelpers {
 
 /// Owns a set of Core Audio property listeners and removes them on `deinit`.
 /// Block-based variant — the same block reference must be passed to Add and Remove.
-final class CoreAudioListenerToken {
+nonisolated final class CoreAudioListenerToken: @unchecked Sendable {
     private struct Entry {
         let objectID: AudioObjectID
         let address: AudioObjectPropertyAddress
@@ -263,7 +263,7 @@ final class CoreAudioListenerToken {
         selector: AudioObjectPropertySelector,
         scope: AudioObjectPropertyScope = kAudioObjectPropertyScopeGlobal,
         element: AudioObjectPropertyElement = kAudioObjectPropertyElementMain,
-        handler: @escaping () -> Void
+        handler: @escaping @Sendable () -> Void
     ) {
         var address = AudioObjectPropertyAddress(
             mSelector: selector, mScope: scope, mElement: element)

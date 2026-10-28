@@ -2,7 +2,7 @@ import SwiftUI
 
 struct UpdateBannerWidget: View {
     @ObservedObject private var configManager = ConfigManager.shared
-    @StateObject private var updater = AppUpdater()
+    private let updater = AppUpdater.shared
     @State private var isUpdating = false
 
     var body: some View {
@@ -21,10 +21,9 @@ struct UpdateBannerWidget: View {
     /// Downloads and installs the update, then terminates the application.
     private func handleUpdate() {
         isUpdating = true
-        updater.downloadAndInstall(latest: updater.latestVersion ?? "") {
-            DispatchQueue.main.async {
-                NSApplication.shared.terminate(nil)
-            }
+        Task {
+            await updater.downloadAndInstall(latest: updater.latestVersion ?? "")
+            NSApplication.shared.terminate(nil)
         }
     }
 }

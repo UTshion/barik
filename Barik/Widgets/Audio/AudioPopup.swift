@@ -2,7 +2,7 @@ import SwiftUI
 
 /// Popup window for audio control with volume adjustment and device selection.
 struct AudioPopup: View {
-    @ObservedObject var viewModel: AudioViewModel
+    let viewModel: AudioViewModel
 
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
@@ -166,7 +166,7 @@ struct AudioPopup: View {
 
 struct AudioPopup_Previews: PreviewProvider {
     static var previews: some View {
-        AudioPopup(viewModel: AudioViewModel())
+        AudioPopup(viewModel: .shared)
             .previewLayout(.sizeThatFits)
     }
 }

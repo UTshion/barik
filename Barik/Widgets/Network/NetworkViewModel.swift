@@ -3,7 +3,7 @@ import CoreWLAN
 import Network
 import SwiftUI
 
-enum NetworkState: String {
+nonisolated enum NetworkState: String, Sendable {
     case connected = "Connected"
     case connectedWithoutInternet = "No Internet"
     case connecting = "Connecting"
@@ -12,7 +12,7 @@ enum NetworkState: String {
     case notSupported = "Not Supported"
 }
 
-enum WifiSignalStrength: String {
+nonisolated enum WifiSignalStrength: String, Sendable {
     case low = "Low"
     case medium = "Medium"
     case high = "High"
@@ -22,20 +22,25 @@ enum WifiSignalStrength: String {
 /// Unified view model for monitoring network and Wi‑Fi status.
 ///
 /// Event-driven:
-/// - Overall reachability via `NWPathMonitor` (always was event-driven; unchanged).
-/// - Wi‑Fi details (SSID/RSSI/channel) via `CWEventDelegate` — replaces the previous
-///   main-runloop 5s polling that could stall when wifid was slow.
-final class NetworkStatusViewModel: NSObject, ObservableObject,
-    CLLocationManagerDelegate, CWEventDelegate
+/// - Overall reachability via `NWPathMonitor`.
+/// - Wi‑Fi details (SSID/RSSI/channel) via `CWEventDelegate`.
+///
+/// Shared by the widget and popup on every display, so there is exactly one
+/// path monitor and one CoreWLAN subscription for the whole app.
+@MainActor
+@Observable
+final class NetworkStatusViewModel: NSObject, CLLocationManagerDelegate,
+    CWEventDelegate
 {
+    static let shared = NetworkStatusViewModel()
 
-    @Published var wifiState: NetworkState = .disconnected
-    @Published var ethernetState: NetworkState = .disconnected
+    private(set) var wifiState: NetworkState = .disconnected
+    private(set) var ethernetState: NetworkState = .disconnected
 
-    @Published var ssid: String = "Not connected"
-    @Published var rssi: Int = 0
-    @Published var noise: Int = 0
-    @Published var channel: String = "N/A"
+    private(set) var ssid: String = "Not connected"
+    private(set) var rssi: Int = 0
+    private(set) var noise: Int = 0
+    private(set) var channel: String = "N/A"
 
     var wifiSignalStrength: WifiSignalStrength {
         if ssid == "Not connected" || ssid == "No interface" {
@@ -46,16 +51,14 @@ final class NetworkStatusViewModel: NSObject, ObservableObject,
         return .low
     }
 
-    private let monitor = NWPathMonitor()
-    private let monitorQueue = DispatchQueue(label: "NetworkMonitor")
+    @ObservationIgnored private let monitor = NWPathMonitor()
+    @ObservationIgnored private let monitorQueue = DispatchQueue(
+        label: "NetworkMonitor")
+    @ObservationIgnored private let wifiClient = CWWiFiClient.shared()
+    @ObservationIgnored private var safetyTask: Task<Void, Never>?
+    @ObservationIgnored private let locationManager = CLLocationManager()
 
-    private let wifiClient = CWWiFiClient.shared()
-    private let wifiQueue = DispatchQueue(label: "app.barik.coreWLAN")
-    private var safetyTimer: Timer?
-
-    private let locationManager = CLLocationManager()
-
-    override init() {
+    private override init() {
         super.init()
         locationManager.delegate = self
         locationManager.requestWhenInUseAuthorization()
@@ -63,59 +66,33 @@ final class NetworkStatusViewModel: NSObject, ObservableObject,
         startWiFiMonitoring()
     }
 
-    deinit {
-        stopNetworkMonitoring()
-        stopWiFiMonitoring()
-    }
-
     // MARK: — NWPathMonitor for overall network status.
 
     private func startNetworkMonitoring() {
         monitor.pathUpdateHandler = { [weak self] path in
-            guard let self = self else { return }
-            DispatchQueue.main.async {
-                if path.availableInterfaces.contains(where: { $0.type == .wifi }) {
-                    if path.usesInterfaceType(.wifi) {
-                        switch path.status {
-                        case .satisfied:
-                            self.wifiState = .connected
-                        case .requiresConnection:
-                            self.wifiState = .connecting
-                        default:
-                            self.wifiState = .connectedWithoutInternet
-                        }
-                    } else {
-                        self.wifiState = .disconnected
-                    }
-                } else {
-                    self.wifiState = .notSupported
-                }
-
-                if path.availableInterfaces.contains(where: {
-                    $0.type == .wiredEthernet
-                }) {
-                    if path.usesInterfaceType(.wiredEthernet) {
-                        switch path.status {
-                        case .satisfied:
-                            self.ethernetState = .connected
-                        case .requiresConnection:
-                            self.ethernetState = .connecting
-                        default:
-                            self.ethernetState = .disconnected
-                        }
-                    } else {
-                        self.ethernetState = .disconnected
-                    }
-                } else {
-                    self.ethernetState = .notSupported
-                }
+            let wifi = Self.state(of: .wifi, in: path, fallback: .connectedWithoutInternet)
+            let ethernet = Self.state(of: .wiredEthernet, in: path, fallback: .disconnected)
+            Task { @MainActor in
+                guard let self else { return }
+                if self.wifiState != wifi { self.wifiState = wifi }
+                if self.ethernetState != ethernet { self.ethernetState = ethernet }
             }
         }
         monitor.start(queue: monitorQueue)
     }
 
-    private func stopNetworkMonitoring() {
-        monitor.cancel()
+    private nonisolated static func state(
+        of type: NWInterface.InterfaceType, in path: NWPath,
+        fallback: NetworkState
+    ) -> NetworkState {
+        guard path.availableInterfaces.contains(where: { $0.type == type })
+        else { return .notSupported }
+        guard path.usesInterfaceType(type) else { return .disconnected }
+        switch path.status {
+        case .satisfied: return .connected
+        case .requiresConnection: return .connecting
+        default: return fallback
+        }
     }
 
     // MARK: — CoreWLAN event monitoring
@@ -133,48 +110,36 @@ final class NetworkStatusViewModel: NSObject, ObservableObject,
         }
 
         // 30s safety net (cheap — same off-main IPC).
-        safetyTimer = Timer.scheduledTimer(withTimeInterval: 30.0, repeats: true) {
-            [weak self] _ in
-            self?.refreshWiFiInfo()
-        }
-        refreshWiFiInfo()
-    }
-
-    private func stopWiFiMonitoring() {
-        safetyTimer?.invalidate()
-        safetyTimer = nil
-        for event in [
-            CWEventType.ssidDidChange, .bssidDidChange, .linkDidChange,
-            .linkQualityDidChange, .powerDidChange
-        ] {
-            try? wifiClient.stopMonitoringEvent(with: event)
-        }
-        wifiClient.delegate = nil
-    }
-
-    /// Reads CoreWLAN off the main thread and posts back to main.
-    private func refreshWiFiInfo() {
-        wifiQueue.async { [weak self] in
-            guard let self else { return }
-            let snapshot = self.readSnapshot()
-            DispatchQueue.main.async {
-                self.ssid = snapshot.ssid
-                self.rssi = snapshot.rssi
-                self.noise = snapshot.noise
-                self.channel = snapshot.channel
+        safetyTask = Task { [weak self] in
+            while !Task.isCancelled {
+                self?.refreshWiFiInfo()
+                try? await Task.sleep(for: .seconds(30))
             }
         }
     }
 
-    private struct WiFiSnapshot {
+    /// Reads CoreWLAN off the main actor (wifid IPC can be slow) and publishes
+    /// the result back on the main actor.
+    private func refreshWiFiInfo() {
+        Task {
+            let snapshot = await Self.readSnapshot()
+            if ssid != snapshot.ssid { ssid = snapshot.ssid }
+            if rssi != snapshot.rssi { rssi = snapshot.rssi }
+            if noise != snapshot.noise { noise = snapshot.noise }
+            if channel != snapshot.channel { channel = snapshot.channel }
+        }
+    }
+
+    private struct WiFiSnapshot: Sendable {
         let ssid: String
         let rssi: Int
         let noise: Int
         let channel: String
     }
 
-    private func readSnapshot() -> WiFiSnapshot {
-        guard let interface = wifiClient.interface() else {
+    @concurrent
+    private nonisolated static func readSnapshot() async -> WiFiSnapshot {
+        guard let interface = CWWiFiClient.shared().interface() else {
             return WiFiSnapshot(
                 ssid: "No interface", rssi: 0, noise: 0, channel: "N/A")
         }
@@ -200,39 +165,39 @@ final class NetworkStatusViewModel: NSObject, ObservableObject,
             noise: noiseValue, channel: channelStr)
     }
 
-    // MARK: — CWEventDelegate
+    // MARK: — CWEventDelegate (called on CoreWLAN's own queue)
 
-    func ssidDidChangeForWiFiInterface(withName interfaceName: String) {
-        refreshWiFiInfo()
+    nonisolated func ssidDidChangeForWiFiInterface(withName interfaceName: String) {
+        Task { @MainActor in self.refreshWiFiInfo() }
     }
 
-    func bssidDidChangeForWiFiInterface(withName interfaceName: String) {
-        refreshWiFiInfo()
+    nonisolated func bssidDidChangeForWiFiInterface(withName interfaceName: String) {
+        Task { @MainActor in self.refreshWiFiInfo() }
     }
 
-    func linkDidChangeForWiFiInterface(withName interfaceName: String) {
-        refreshWiFiInfo()
+    nonisolated func linkDidChangeForWiFiInterface(withName interfaceName: String) {
+        Task { @MainActor in self.refreshWiFiInfo() }
     }
 
-    func linkQualityDidChangeForWiFiInterface(
+    nonisolated func linkQualityDidChangeForWiFiInterface(
         withName interfaceName: String, rssi: Int, transmitRate: Double
     ) {
         // Avoid an IPC round-trip for RSSI updates — the value is given.
-        DispatchQueue.main.async {
-            self.rssi = rssi
+        Task { @MainActor in
+            if self.rssi != rssi { self.rssi = rssi }
         }
     }
 
-    func powerStateDidChangeForWiFiInterface(withName interfaceName: String) {
-        refreshWiFiInfo()
+    nonisolated func powerStateDidChangeForWiFiInterface(withName interfaceName: String) {
+        Task { @MainActor in self.refreshWiFiInfo() }
     }
 
-    // MARK: — CLLocationManagerDelegate.
+    // MARK: — CLLocationManagerDelegate
 
-    func locationManager(
-        _ manager: CLLocationManager,
-        didChangeAuthorization status: CLAuthorizationStatus
+    nonisolated func locationManagerDidChangeAuthorization(
+        _ manager: CLLocationManager
     ) {
-        refreshWiFiInfo()
+        // SSID is only readable once location access is granted.
+        Task { @MainActor in self.refreshWiFiInfo() }
     }
 }

@@ -21,12 +21,12 @@ enum BarikAppControl {
         NSWorkspace.shared.openApplication(
             at: bundleURL, configuration: configuration
         ) { _, error in
-            if let error = error {
-                logger.error(
-                    "Failed to relaunch Barik: \(error.localizedDescription, privacy: .public)"
-                )
-            }
-            DispatchQueue.main.async {
+            let message = error?.localizedDescription
+            Task { @MainActor in
+                if let message {
+                    logger.error(
+                        "Failed to relaunch Barik: \(message, privacy: .public)")
+                }
                 NSApplication.shared.terminate(nil)
             }
         }

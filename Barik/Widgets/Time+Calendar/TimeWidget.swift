@@ -16,46 +16,34 @@ struct TimeWidget: View {
         calendarConfig?["show-events"]?.boolValue ?? true
     }
 
-    @State private var currentTime = Date()
-    @StateObject private var calendarManager: CalendarManager
+    private let calendarManager = CalendarManager.shared
 
     @State private var rect = CGRect()
 
-    init(calendarManager: CalendarManager) {
-        _calendarManager = StateObject(wrappedValue: calendarManager)
-    }
-
-    private let timer = Timer.publish(every: 1, on: .main, in: .common)
-        .autoconnect()
-
     var body: some View {
-        VStack(alignment: .trailing, spacing: 0) {
-            Text(formattedTime(pattern: format, from: currentTime))
-                .fontWeight(.semibold)
-            if let event = calendarManager.nextEvent, calendarShowEvents {
-                Text(eventText(for: event))
-                    .opacity(0.8)
-                    .font(.subheadline)
+        // TimelineView ticks on whole seconds without a Combine timer and
+        // pauses automatically while the view is off screen.
+        TimelineView(.periodic(from: .now, by: 1)) { context in
+            VStack(alignment: .trailing, spacing: 0) {
+                Text(formattedTime(pattern: format, from: context.date))
+                    .fontWeight(.semibold)
+                if let event = calendarManager.nextEvent, calendarShowEvents {
+                    Text(eventText(for: event))
+                        .opacity(0.8)
+                        .font(.subheadline)
+                }
             }
         }
         .font(.headline)
         .foregroundStyle(.foregroundOutside)
         .shadow(color: .foregroundShadowOutside, radius: 3)
-        .onReceive(timer) { date in
-            currentTime = date
+        .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: {
+            rect = $0
         }
-        .background(
-            GeometryReader { geometry in
-                Color.clear
-                    .onAppear {
-                        rect = geometry.frame(in: .global)
-                    }
-                    .onChange(of: geometry.frame(in: .global)) {
-                        oldState, newState in
-                        rect = newState
-                    }
-            }
-        )
+        .onAppear { calendarManager.updateConfig(config) }
+        .onChange(of: configProvider.config) { _, newConfig in
+            calendarManager.updateConfig(newConfig)
+        }
         .experimentalConfiguration(cornerRadius: 15)
         .frame(maxHeight: .infinity)
         .background(.black.opacity(0.001))
@@ -71,18 +59,8 @@ struct TimeWidget: View {
 
     // Format the current time.
     private func formattedTime(pattern: String, from time: Date) -> String {
-        let formatter = DateFormatter()
-        formatter.setLocalizedDateFormatFromTemplate(pattern)
-
-        if let timeZone = timeZone,
-            let tz = TimeZone(identifier: timeZone)
-        {
-            formatter.timeZone = tz
-        } else {
-            formatter.timeZone = TimeZone.current
-        }
-
-        return formatter.string(from: time)
+        DateFormatterCache.formatter(template: pattern, timeZone: timeZone)
+            .string(from: time)
     }
 
     // Create text for the calendar event.
@@ -101,11 +79,30 @@ struct TimeWidget: View {
 struct TimeWidget_Previews: PreviewProvider {
     static var previews: some View {
         let provider = ConfigProvider(config: ConfigData())
-        let manager = CalendarManager(configProvider: provider)
 
         ZStack {
-            TimeWidget(calendarManager: manager)
+            TimeWidget()
                 .environmentObject(provider)
         }.frame(width: 500, height: 100)
+    }
+}
+
+/// `DateFormatter` creation is costly; the bar re-renders the clock every
+/// second, so formatters are cached per template/time zone.
+@MainActor
+private enum DateFormatterCache {
+    private static var cache: [String: DateFormatter] = [:]
+
+    static func formatter(template: String, timeZone: String?)
+        -> DateFormatter
+    {
+        let key = "\(template)|\(timeZone ?? "")|\(TimeZone.current.identifier)"
+        if let cached = cache[key] { return cached }
+        let formatter = DateFormatter()
+        formatter.setLocalizedDateFormatFromTemplate(template)
+        formatter.timeZone =
+            timeZone.flatMap(TimeZone.init(identifier:)) ?? .current
+        cache[key] = formatter
+        return formatter
     }
 }

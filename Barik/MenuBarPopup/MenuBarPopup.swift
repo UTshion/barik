@@ -28,7 +28,8 @@ class HidingPanel: NSPanel, NSWindowDelegate {
                 Constants.menuBarPopupAnimationDurationInMilliseconds) / 1000.0,
             repeats: false
         ) { [weak self] _ in
-            self?.orderOut(nil)
+            // Scheduled on the main run loop.
+            MainActor.assumeIsolated { self?.orderOut(nil) }
         }
     }
 }

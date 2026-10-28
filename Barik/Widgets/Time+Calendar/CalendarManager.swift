@@ -1,86 +1,83 @@
 import EventKit
 import Foundation
+import Observation
 
 /// Manages calendar event queries.
 ///
 /// Event-driven via `EKEventStoreChanged` — EventKit posts that notification
 /// whenever the store mutates (new event, sync from iCloud, etc.). A 5-minute
-/// safety-net timer keeps the "next event" up to date even if no events fire
+/// safety-net tick keeps the "next event" up to date even if no events fire
 /// (e.g. when an event simply starts).
-class CalendarManager: ObservableObject {
-    let configProvider: ConfigProvider
-    var config: ConfigData? {
-        configProvider.config["calendar"]?.dictionaryValue
-    }
-    var allowList: [String] {
-        Array(
-            (config?["allow-list"]?.arrayValue?.map { $0.stringValue ?? "" }
-                .drop(while: { $0 == "" })) ?? [])
-    }
-    var denyList: [String] {
-        Array(
-            (config?["deny-list"]?.arrayValue?.map { $0.stringValue ?? "" }
-                .drop(while: { $0 == "" })) ?? [])
-    }
+///
+/// A single shared instance backs every time widget and calendar popup:
+/// `EKEventStore` is expensive to create and previously a new manager (and
+/// store) was built on every bar re-render.
+@MainActor
+@Observable
+final class CalendarManager {
+    static let shared = CalendarManager()
 
-    @Published var nextEvent: EKEvent?
-    @Published var todaysEvents: [EKEvent] = []
-    @Published var tomorrowsEvents: [EKEvent] = []
+    private(set) var nextEvent: EKEvent?
+    private(set) var todaysEvents: [EKEvent] = []
+    private(set) var tomorrowsEvents: [EKEvent] = []
 
-    private let eventStore = EKEventStore()
-    private var safetyTimer: Timer?
-    private var refreshInFlight = false
+    @ObservationIgnored private let store = EventStoreBox()
+    @ObservationIgnored private var allowList: [String] = []
+    @ObservationIgnored private var denyList: [String] = []
+    @ObservationIgnored private var isMonitoring = false
+    @ObservationIgnored private var refreshInFlight = false
+    @ObservationIgnored private var needsRefresh = false
 
-    init(configProvider: ConfigProvider) {
-        self.configProvider = configProvider
+    private init() {
         requestAccess()
     }
 
-    deinit {
-        stopMonitoring()
-        NotificationCenter.default.removeObserver(self)
+    /// Applies the widget's `calendar.allow-list` / `calendar.deny-list`.
+    func updateConfig(_ config: ConfigData) {
+        let calendar = config["calendar"]?.dictionaryValue
+        func list(_ key: String) -> [String] {
+            calendar?[key]?.arrayValue?.compactMap(\.stringValue)
+                .filter { !$0.isEmpty } ?? []
+        }
+        let allow = list("allow-list")
+        let deny = list("deny-list")
+        guard allow != allowList || deny != denyList else { return }
+        allowList = allow
+        denyList = deny
+        refresh()
     }
 
     private func startMonitoring() {
+        guard !isMonitoring else { return }
+        isMonitoring = true
+
         NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(eventStoreChanged),
-            name: .EKEventStoreChanged,
-            object: eventStore)
-
-        // 5-minute safety net catches "next event" transitions (events that just started/ended).
-        safetyTimer = Timer.scheduledTimer(
-            withTimeInterval: 300.0, repeats: true
+            forName: .EKEventStoreChanged, object: store.eventStore,
+            queue: .main
         ) { [weak self] _ in
-            self?.refresh()
+            MainActor.assumeIsolated { self?.refresh() }
         }
-        refresh()
-    }
 
-    private func stopMonitoring() {
-        safetyTimer?.invalidate()
-        safetyTimer = nil
-    }
-
-    @objc private func eventStoreChanged() {
-        refresh()
+        Task { [weak self] in
+            while !Task.isCancelled {
+                self?.refresh()
+                try? await Task.sleep(for: .seconds(300))
+            }
+        }
     }
 
     private func requestAccess() {
-        let status = EKEventStore.authorizationStatus(for: .event)
-        switch status {
+        switch EKEventStore.authorizationStatus(for: .event) {
         case .fullAccess:
             startMonitoring()
         case .notDetermined:
-            eventStore.requestFullAccessToEvents { [weak self] granted, error in
-                guard granted, error == nil else {
-                    if let error {
-                        print("Calendar access not granted: \(error)")
-                    }
-                    return
-                }
-                DispatchQueue.main.async {
-                    self?.startMonitoring()
+            Task {
+                do {
+                    guard try await store.eventStore.requestFullAccessToEvents()
+                    else { return }
+                    startMonitoring()
+                } catch {
+                    print("Calendar access not granted: \(error)")
                 }
             }
         default:
@@ -88,88 +85,76 @@ class CalendarManager: ObservableObject {
         }
     }
 
-    private func filterEvents(
-        _ events: [EKEvent], allowList: [String], denyList: [String]
-    ) -> [EKEvent] {
-        var filtered = events
-        if !allowList.isEmpty {
-            filtered = filtered.filter { allowList.contains($0.calendar.title) }
-        }
-        if !denyList.isEmpty {
-            filtered = filtered.filter { !denyList.contains($0.calendar.title) }
-        }
-        return filtered
-    }
-
-    /// Fetches today's and tomorrow's events on a background queue and republishes results on main.
+    /// Fetches today's and tomorrow's events off the main actor.
     private func refresh() {
-        assert(Thread.isMainThread)
-        guard !refreshInFlight else { return }
+        guard isMonitoring else { return }
+        guard !refreshInFlight else {
+            // Coalesce: run once more after the in-flight fetch finishes.
+            needsRefresh = true
+            return
+        }
         refreshInFlight = true
-
-        // Capture config from main (it's a SwiftUI @Published-derived value).
-        let allow = allowList
-        let deny = denyList
-
-        DispatchQueue.global(qos: .utility).async { [weak self] in
-            guard let self else { return }
-            let calendars = self.eventStore.calendars(for: .event)
-            let now = Date()
-            let cal = Calendar.current
-            let startOfDay = cal.startOfDay(for: now)
-            guard
-                let endOfDay = cal.date(
-                    bySettingHour: 23, minute: 59, second: 59, of: now),
-                let startOfTomorrow = cal.date(
-                    byAdding: .day, value: 1, to: startOfDay),
-                let endOfTomorrow = cal.date(
-                    bySettingHour: 23, minute: 59, second: 59,
-                    of: startOfTomorrow)
-            else {
-                DispatchQueue.main.async { self.refreshInFlight = false }
-                return
-            }
-
-            // Today's events.
-            let todayPredicate = self.eventStore.predicateForEvents(
-                withStart: startOfDay, end: endOfDay, calendars: calendars)
-            let allToday = self.eventStore.events(matching: todayPredicate)
-                .sorted { $0.startDate < $1.startDate }
-            let todayFiltered = self.filterEvents(
-                allToday, allowList: allow, denyList: deny)
-            let todayUpcoming = todayFiltered.filter { $0.endDate >= now }
-
-            // Next event (from now through end of day).
-            let nextPredicate = self.eventStore.predicateForEvents(
-                withStart: now, end: endOfDay, calendars: calendars)
-            let nextRange = self.eventStore.events(matching: nextPredicate)
-                .sorted { $0.startDate < $1.startDate }
-            let nextFiltered = self.filterEvents(
-                nextRange, allowList: allow, denyList: deny)
-            let nextEvent =
-                nextFiltered.first(where: { !$0.isAllDay }) ?? nextFiltered.first
-
-            // Tomorrow's events.
-            let tomorrowPredicate = self.eventStore.predicateForEvents(
-                withStart: startOfTomorrow, end: endOfTomorrow,
-                calendars: calendars)
-            let tomorrowEvents = self.eventStore.events(
-                matching: tomorrowPredicate
-            ).sorted { $0.startDate < $1.startDate }
-            let tomorrowFiltered = self.filterEvents(
-                tomorrowEvents, allowList: allow, denyList: deny)
-
-            DispatchQueue.main.async {
-                self.todaysEvents = todayUpcoming
-                self.nextEvent = nextEvent
-                self.tomorrowsEvents = tomorrowFiltered
-                self.refreshInFlight = false
+        Task {
+            let snapshot = await Self.fetch(
+                from: store, allowList: allowList, denyList: denyList)
+            todaysEvents = snapshot.today
+            nextEvent = snapshot.next
+            tomorrowsEvents = snapshot.tomorrow
+            refreshInFlight = false
+            if needsRefresh {
+                needsRefresh = false
+                refresh()
             }
         }
     }
 
-    /// Kept for source compatibility — manual refresh entry points.
-    func fetchNextEvent() { refresh() }
-    func fetchTodaysEvents() { refresh() }
-    func fetchTomorrowsEvents() { refresh() }
+    /// EventKit objects aren't `Sendable`, but the fetched events are freshly
+    /// created and only handed over once, so moving them across is safe.
+    nonisolated private struct Snapshot: @unchecked Sendable {
+        var today: [EKEvent] = []
+        var next: EKEvent?
+        var tomorrow: [EKEvent] = []
+    }
+
+    @concurrent
+    private nonisolated static func fetch(
+        from store: EventStoreBox, allowList: [String], denyList: [String]
+    ) async -> Snapshot {
+        let eventStore = store.eventStore
+        let calendars = eventStore.calendars(for: .event).filter {
+            (allowList.isEmpty || allowList.contains($0.title))
+                && !denyList.contains($0.title)
+        }
+        guard !calendars.isEmpty else { return Snapshot() }
+
+        let now = Date()
+        let cal = Calendar.current
+        let startOfDay = cal.startOfDay(for: now)
+        guard
+            let startOfTomorrow = cal.date(
+                byAdding: .day, value: 1, to: startOfDay),
+            let endOfTomorrow = cal.date(
+                byAdding: .day, value: 1, to: startOfTomorrow)
+        else { return Snapshot() }
+
+        func events(from start: Date, to end: Date) -> [EKEvent] {
+            eventStore.events(
+                matching: eventStore.predicateForEvents(
+                    withStart: start, end: end, calendars: calendars)
+            ).sorted { $0.startDate < $1.startDate }
+        }
+
+        let today = events(from: startOfDay, to: startOfTomorrow)
+        // Still-running and future events; the "next" one may be in progress.
+        let upcoming = today.filter { $0.endDate >= now }
+        return Snapshot(
+            today: upcoming,
+            next: upcoming.first(where: { !$0.isAllDay }) ?? upcoming.first,
+            tomorrow: events(from: startOfTomorrow, to: endOfTomorrow))
+    }
+}
+
+/// `EKEventStore` is documented as safe to query from background threads.
+nonisolated final class EventStoreBox: @unchecked Sendable {
+    let eventStore = EKEventStore()
 }

@@ -11,7 +11,8 @@ import os
 /// This is observability, not recovery. It does not unwedge the app, but having
 /// the log makes it possible to correlate stalls with their cause (e.g. a
 /// runaway subprocess or a slow EventKit query) after the fact.
-final class MainThreadStallDetector {
+/// Thread safety: `timer` is confined to `queue`; heartbeat state is guarded by `lock`.
+nonisolated final class MainThreadStallDetector: @unchecked Sendable {
     static let shared = MainThreadStallDetector()
 
     private let logger = Logger(

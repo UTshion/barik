@@ -7,8 +7,6 @@ struct CustomCommandWidget: View {
 
     @State private var output: String = ""
     @State private var error: String?
-    @State private var isRunning: Bool = false
-    @State private var timer: Timer?
 
     var command: String? { config["command"]?.stringValue }
     var interval: Double {
@@ -23,6 +21,12 @@ struct CustomCommandWidget: View {
     }
     var format: String? { config["format"]?.stringValue }
     var clickCommand: String? { config["click-command"]?.stringValue }
+
+    /// Restarts the polling loop whenever the command or interval changes.
+    private struct TaskKey: Equatable {
+        let command: String?
+        let interval: Double
+    }
 
     var body: some View {
         Group {
@@ -40,71 +44,55 @@ struct CustomCommandWidget: View {
                     .font(.system(size: 11))
             }
         }
-        .onAppear {
-            executeCommand()
-            startTimer()
-        }
-        .onDisappear {
-            stopTimer()
+        // The loop runs one command at a time, so a slow command can never
+        // pile up background work; it is cancelled when the view disappears.
+        .task(id: TaskKey(command: command, interval: interval)) {
+            while !Task.isCancelled {
+                await executeCommand()
+                try? await Task.sleep(for: .seconds(interval))
+            }
         }
         .onTapGesture {
             if let clickCmd = clickCommand {
-                executeClickCommand(clickCmd)
+                Task {
+                    await SubprocessRunner.run(
+                        executable: "/bin/bash", arguments: ["-c", clickCmd],
+                        timeout: 5.0)
+                }
             }
         }
     }
 
-    private func executeCommand() {
+    private func executeCommand() async {
         guard let cmd = command else {
             error = "No command specified"
             return
         }
-        // Re-entrancy guard: skip the tick if the previous command is still running.
-        // Prevents a slow user command from queueing background work indefinitely.
-        guard !isRunning else { return }
-
-        isRunning = true
         let timeout = min(max(1.0, interval / 2.0), 5.0)
-        DispatchQueue.global(qos: .utility).async {
-            let result = SubprocessRunner.run(
-                executable: "/bin/bash",
-                arguments: ["-c", cmd],
-                timeout: timeout)
-            DispatchQueue.main.async {
-                defer { isRunning = false }
-                guard let result else {
-                    self.error = "Failed to launch command"
-                    self.output = ""
-                    return
-                }
-                if result.timedOut {
-                    self.error = "Command timed out after \(Int(timeout))s"
-                    self.output = ""
-                    return
-                }
-                let stdout = String(data: result.stdout, encoding: .utf8)?
-                    .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-                let stderr = String(data: result.stderr, encoding: .utf8)?
-                    .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-                if result.exitCode != 0 {
-                    self.error = stderr.isEmpty
-                        ? "Command failed with exit code \(result.exitCode)"
-                        : stderr
-                    self.output = ""
-                } else {
-                    self.output = formatOutput(stdout)
-                    self.error = nil
-                }
-            }
+        let result = await SubprocessRunner.run(
+            executable: "/bin/bash", arguments: ["-c", cmd], timeout: timeout)
+        guard let result else {
+            error = "Failed to launch command"
+            output = ""
+            return
         }
-    }
-
-    private func executeClickCommand(_ cmd: String) {
-        DispatchQueue.global(qos: .userInitiated).async {
-            _ = SubprocessRunner.run(
-                executable: "/bin/bash",
-                arguments: ["-c", cmd],
-                timeout: 5.0)
+        if result.timedOut {
+            error = "Command timed out after \(Int(timeout))s"
+            output = ""
+            return
+        }
+        let stdout = String(data: result.stdout, encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let stderr = String(data: result.stderr, encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if result.exitCode != 0 {
+            error = stderr.isEmpty
+                ? "Command failed with exit code \(result.exitCode)"
+                : stderr
+            output = ""
+        } else {
+            output = formatOutput(stdout)
+            error = nil
         }
     }
 
@@ -113,20 +101,6 @@ struct CustomCommandWidget: View {
             return output
         }
         return format.replacingOccurrences(of: "{output}", with: output)
-    }
-
-    private func startTimer() {
-        let tickInterval = interval
-        guard tickInterval > 0 else { return }
-
-        timer = Timer.scheduledTimer(withTimeInterval: tickInterval, repeats: true) { _ in
-            executeCommand()
-        }
-    }
-
-    private func stopTimer() {
-        timer?.invalidate()
-        timer = nil
     }
 }
 

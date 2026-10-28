@@ -1,42 +1,35 @@
 import Foundation
 import IOKit.ps
+import Observation
 
 /// Monitors battery status via IOKit power-source notifications.
 /// Event-driven — `IOPSNotificationCreateRunLoopSource` posts on the main runloop
 /// when the system's power state changes (charger plug/unplug, capacity change, etc.).
-/// A coarse safety-net timer (60s) is the only remaining polling.
-class BatteryManager: ObservableObject {
-    @Published var batteryLevel: Int = 0
-    @Published var isCharging: Bool = false
-    @Published var isPluggedIn: Bool = false
+/// A coarse safety-net tick (60s) is the only remaining polling.
+///
+/// Shared by every bar and popup so there is a single IOKit observer for the
+/// whole app instead of one per widget instance.
+@MainActor
+@Observable
+final class BatteryManager {
+    static let shared = BatteryManager()
 
-    private var runLoopSource: CFRunLoopSource?
-    private var safetyTimer: Timer?
+    private(set) var batteryLevel: Int = 0
+    private(set) var isCharging: Bool = false
+    private(set) var isPluggedIn: Bool = false
 
-    init() {
-        startMonitoring()
-    }
+    @ObservationIgnored private var runLoopSource: CFRunLoopSource?
+    @ObservationIgnored private var safetyTask: Task<Void, Never>?
 
-    deinit {
-        stopMonitoring()
-    }
-
-    private func startMonitoring() {
+    private init() {
         updateBatteryStatus()
         installPowerSourceObserver()
 
-        safetyTimer = Timer.scheduledTimer(withTimeInterval: 60.0, repeats: true) {
-            [weak self] _ in
-            self?.updateBatteryStatus()
-        }
-    }
-
-    private func stopMonitoring() {
-        safetyTimer?.invalidate()
-        safetyTimer = nil
-        if let source = runLoopSource {
-            CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .defaultMode)
-            runLoopSource = nil
+        safetyTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(60))
+                self?.updateBatteryStatus()
+            }
         }
     }
 
@@ -44,10 +37,13 @@ class BatteryManager: ObservableObject {
         let context = Unmanaged.passUnretained(self).toOpaque()
         let callback: IOPowerSourceCallbackType = { context in
             guard let context else { return }
-            let manager = Unmanaged<BatteryManager>.fromOpaque(context)
-                .takeUnretainedValue()
-            // Callback fires on the runloop the source is attached to (main).
-            manager.updateBatteryStatus()
+            // The source is attached to the main runloop, so the callback
+            // always fires on the main thread.
+            MainActor.assumeIsolated {
+                Unmanaged<BatteryManager>.fromOpaque(context)
+                    .takeUnretainedValue()
+                    .updateBatteryStatus()
+            }
         }
         if let source = IOPSNotificationCreateRunLoopSource(callback, context)?
             .takeRetainedValue()
@@ -67,8 +63,9 @@ class BatteryManager: ObservableObject {
         }
 
         for source in sources {
-            if let description = IOPSGetPowerSourceDescription(
-                snapshot, source)?.takeUnretainedValue() as? [String: Any],
+            guard
+                let description = IOPSGetPowerSourceDescription(
+                    snapshot, source)?.takeUnretainedValue() as? [String: Any],
                 let currentCapacity = description[
                     kIOPSCurrentCapacityKey as String] as? Int,
                 let maxCapacity = description[kIOPSMaxCapacityKey as String]
@@ -77,23 +74,16 @@ class BatteryManager: ObservableObject {
                     as? Bool,
                 let powerSourceState = description[
                     kIOPSPowerSourceStateKey as String] as? String
-            {
-                let isAC = (powerSourceState == kIOPSACPowerValue)
-                let level = maxCapacity > 0
-                    ? (currentCapacity * 100) / maxCapacity : 0
+            else { continue }
 
-                let publish = { [weak self] in
-                    guard let self else { return }
-                    self.batteryLevel = level
-                    self.isCharging = charging
-                    self.isPluggedIn = isAC
-                }
-                if Thread.isMainThread {
-                    publish()
-                } else {
-                    DispatchQueue.main.async(execute: publish)
-                }
-            }
+            let isAC = powerSourceState == kIOPSACPowerValue
+            let level =
+                maxCapacity > 0 ? (currentCapacity * 100) / maxCapacity : 0
+
+            // Only write on change so observers aren't invalidated needlessly.
+            if batteryLevel != level { batteryLevel = level }
+            if isCharging != charging { isCharging = charging }
+            if isPluggedIn != isAC { isPluggedIn = isAC }
         }
     }
 }

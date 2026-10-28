@@ -1,28 +1,29 @@
 import AppKit
-import Combine
 import SwiftUI
 
 // MARK: - Image Cache
 
 /// A singleton cache for storing downloaded NSImage objects.
-final class ImageCache {
+@MainActor
+enum ImageCache {
     static let shared = NSCache<NSString, NSImage>()
 }
 
 // MARK: - Image Loader
 
 /// An observable object that asynchronously downloads and caches images.
+@MainActor
 final class ImageLoader: ObservableObject {
     @Published var image: NSImage?
-    
-    private var cancellable: AnyCancellable?
-    
+
+    private var task: Task<Void, Never>?
+
     /// The URL of the image to load.
     var url: URL?
-    
+
     /// Optional target size to which the image should be resized.
     var targetSize: CGSize?
-    
+
     /// Initializes the loader with an optional URL and target size.
     /// - Parameters:
     ///   - url: The URL of the image.
@@ -31,7 +32,7 @@ final class ImageLoader: ObservableObject {
         self.url = url
         self.targetSize = targetSize
     }
-    
+
     /// Generates a cache key based on the URL and target size.
     private var cacheKey: NSString? {
         guard let url = url else { return nil }
@@ -41,41 +42,34 @@ final class ImageLoader: ObservableObject {
             return url.absoluteString as NSString
         }
     }
-    
+
     /// Loads the image from the URL, resizing if needed, and caches it.
     func load() {
         // Cancel any ongoing request before starting a new one.
-        cancellable?.cancel()
-        
+        task?.cancel()
+
         guard let url = url, let key = cacheKey else { return }
-        
+
         // Check for cached image.
         if let cachedImage = ImageCache.shared.object(forKey: key) {
             self.image = cachedImage
             return
         }
-        
-        // Download image asynchronously.
-        cancellable = URLSession.shared.dataTaskPublisher(for: url)
-            .tryMap { [weak self] data, _ -> NSImage? in
-                guard let downloadedImage = NSImage(data: data) else { return nil }
-                if let targetSize = self?.targetSize {
-                    return downloadedImage.resized(to: targetSize) ?? downloadedImage
-                }
-                return downloadedImage
-            }
-            .replaceError(with: nil)
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] downloadedImage in
-                if let downloadedImage = downloadedImage {
-                    ImageCache.shared.setObject(downloadedImage, forKey: key)
-                }
-                self?.image = downloadedImage
-            }
+
+        let targetSize = targetSize
+        task = Task {
+            guard let (data, _) = try? await URLSession.shared.data(from: url),
+                !Task.isCancelled,
+                let downloaded = NSImage(data: data)
+            else { return }
+            let image = targetSize.flatMap { downloaded.resized(to: $0) } ?? downloaded
+            ImageCache.shared.setObject(image, forKey: key)
+            self.image = image
+        }
     }
-    
+
     deinit {
-        cancellable?.cancel()
+        task?.cancel()
     }
 }
 
@@ -84,15 +78,16 @@ final class ImageLoader: ObservableObject {
 extension NSImage {
     /// Returns a resized version of the image.
     /// - Parameter newSize: The target size.
-    /// - Returns: A new NSImage resized to the given dimensions, or nil if resizing fails.
+    /// - Returns: A new NSImage resized to the given dimensions.
     func resized(to newSize: NSSize) -> NSImage? {
-        let newImage = NSImage(size: newSize)
-        newImage.lockFocus()
-        let rect = NSRect(origin: .zero, size: newSize)
-        self.draw(in: rect, from: NSRect(origin: .zero, size: self.size), operation: .copy, fraction: 1.0)
-        newImage.unlockFocus()
-        newImage.size = newSize
-        return newImage
+        // Drawing-handler images render lazily at the destination's backing
+        // scale, unlike the deprecated lockFocus approach.
+        NSImage(size: newSize, flipped: false) { rect in
+            self.draw(
+                in: rect, from: NSRect(origin: .zero, size: self.size),
+                operation: .copy, fraction: 1.0)
+            return true
+        }
     }
 }
 

@@ -4,7 +4,7 @@ import SwiftUI
 
 struct NowPlayingWidget: View {
     @EnvironmentObject var configProvider: ConfigProvider
-    @ObservedObject var playingManager = NowPlayingManager.shared
+    private let playingManager = NowPlayingManager.shared
 
     @State private var widgetFrame: CGRect = .zero
     @State private var animatedWidth: CGFloat = 0
