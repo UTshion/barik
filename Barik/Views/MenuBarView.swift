@@ -33,7 +33,12 @@ struct MenuBarView: View {
             HStack(spacing: configManager.config.experimental.foreground.spacing) {
                 ForEach(0..<items.count, id: \.self) { index in
                     let item = items[index]
-                    buildView(for: item)
+                    if item.id == "spacer" || item.id == "divider" {
+                        // Layout-only items stay click-through.
+                        buildView(for: item)
+                    } else {
+                        buildView(for: item).barikHitArea()
+                    }
                 }
             }
 
@@ -45,7 +50,9 @@ struct MenuBarView: View {
         .frame(height: max(configManager.config.experimental.foreground.resolveHeight(for: screen), 1.0))
         .frame(maxWidth: .infinity)
         .padding(.horizontal, configManager.config.experimental.foreground.horizontalPadding)
-        .background(.black.opacity(0.001))
+        // No full-width hit background: the bar floats above the system menu
+        // bar, so empty areas must stay fully transparent to let clicks reach
+        // native menu bar items. Each widget provides its own hit area.
         .preferredColorScheme(theme)
         .contextMenu { barikContextMenu }
     }

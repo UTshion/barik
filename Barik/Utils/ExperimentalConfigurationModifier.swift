@@ -29,6 +29,18 @@ private struct ExperimentalConfigurationModifier: ViewModifier {
 }
 
 extension View {
+    /// Makes the whole frame of this view clickable inside Barik's bar.
+    ///
+    /// The window server lets clicks fall through fully transparent pixels of
+    /// the bar panel to the system menu bar below, so a widget's gaps (between
+    /// glyphs, icons, …) need a nearly invisible fill to stay hittable. The
+    /// alpha must survive 8-bit quantization (1/255 ≈ 0.004), hence 0.01.
+    func barikHitArea() -> some View {
+        self
+            .contentShape(Rectangle())
+            .background(Color.black.opacity(0.01))
+    }
+
     func experimentalConfiguration(
         horizontalPadding: CGFloat = 15,
         cornerRadius: CGFloat
