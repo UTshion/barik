@@ -44,7 +44,7 @@ struct NowPlayingPopup: View {
 
 /// A vertical layout for the now playing popup.
 private struct NowPlayingVerticalPopup: View {
-    @ObservedObject private var playingManager = NowPlayingManager.shared
+    private let playingManager = NowPlayingManager.shared
 
     var body: some View {
         if let song = playingManager.nowPlaying,
@@ -112,7 +112,7 @@ private struct NowPlayingVerticalPopup: View {
 
 /// A horizontal layout for the now playing popup.
 struct NowPlayingHorizontalPopup: View {
-    @ObservedObject private var playingManager = NowPlayingManager.shared
+    private let playingManager = NowPlayingManager.shared
 
     var body: some View {
         if let song = playingManager.nowPlaying,

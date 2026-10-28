@@ -2,7 +2,7 @@ import SwiftUI
 
 /// Widget for controlling audio input/output devices and volume.
 struct AudioWidget: View {
-    @StateObject private var viewModel = AudioViewModel()
+    private let viewModel = AudioViewModel.shared
     @State private var rect: CGRect = .zero
 
     var body: some View {

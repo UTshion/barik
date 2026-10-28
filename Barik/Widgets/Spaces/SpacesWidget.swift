@@ -1,7 +1,7 @@
 import SwiftUI
 
 struct SpacesWidget: View {
-    @StateObject var viewModel = SpacesViewModel()
+    @State private var viewModel = SpacesViewModel()
 
     @ObservedObject var configManager = ConfigManager.shared
     var foregroundHeight: CGFloat { configManager.config.experimental.foreground.resolveHeight() }
@@ -9,58 +9,10 @@ struct SpacesWidget: View {
     /// X coordinate of this widget's leading edge in screen/global coordinates.
     @State private var widgetOriginX: CGFloat = 0
 
-    // MARK: - Notch boundary
-
-    /// Queries the on-screen window list for the BoringNotch app's notch window
-    /// and returns its left edge X coordinate in screen coordinates (Quartz X = macOS X).
-    /// Returns nil if BoringNotch is not running or no suitable window is found.
-    private func boringNotchBoundary() -> CGFloat? {
-        let runningApps = NSWorkspace.shared.runningApplications
-        guard let app = runningApps.first(where: {
-            let name = ($0.localizedName ?? "").lowercased()
-            let bundle = ($0.bundleIdentifier ?? "").lowercased()
-            return name.contains("boringnotch") || name.contains("boring notch") ||
-                   bundle.contains("boringnotch") || bundle.contains("boring-notch")
-        }) else { return nil }
-
-        let targetPID = app.processIdentifier
-        guard let windowInfoList = CGWindowListCopyWindowInfo(
-            [.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]]
-        else { return nil }
-
-        var minX: CGFloat? = nil
-        for info in windowInfoList {
-            guard
-                let pid = info[kCGWindowOwnerPID as String] as? pid_t,
-                pid == targetPID,
-                let boundsDict = info[kCGWindowBounds as String] as? NSDictionary,
-                let bounds = CGRect(dictionaryRepresentation: boundsDict)
-            else { continue }
-
-            // Only consider windows sitting in the menu bar area.
-            // In Quartz coordinates, Y = 0 is the top of the primary screen (Y increases downward).
-            guard bounds.minY < 50, bounds.height < 120, bounds.width > 50 else { continue }
-
-            if minX == nil || bounds.minX < minX! {
-                minX = bounds.minX
-            }
-        }
-        return minX
-    }
-
-    /// Effective right boundary of the left-of-notch usable area in screen coordinates.
-    /// Prefers BoringNotch's window edge over the hardware notch boundary from NSScreen,
-    /// since BoringNotch visually extends the notch further than the physical cutout.
-    private var notchLeftBoundary: CGFloat? {
-        if let boundary = boringNotchBoundary() { return boundary }
-        guard let area = NSScreen.main?.auxiliaryTopLeftArea, area.width > 0 else { return nil }
-        return area.maxX
-    }
-
     /// Maximum width this widget may occupy without entering the notch area.
     /// Nil means no constraint (non-notched screens or no detected notch apps).
     private var maxAvailableWidth: CGFloat? {
-        guard let boundary = notchLeftBoundary else { return nil }
+        guard let boundary = viewModel.notchLeftBoundary else { return nil }
         let available = boundary - widgetOriginX
         return available > 0 ? available : nil
     }
@@ -102,7 +54,9 @@ struct SpacesWidget: View {
         )
         .animation(.smooth(duration: 0.3), value: viewModel.spaces)
         .foregroundStyle(Color.foreground)
-        .environmentObject(viewModel)
+        .environment(viewModel)
+        .onAppear { viewModel.start() }
+        .onDisappear { viewModel.stop() }
     }
 
     @ViewBuilder
@@ -120,7 +74,7 @@ struct SpacesWidget: View {
 /// This view shows a space with its windows.
 private struct SpaceView: View {
     @EnvironmentObject var configProvider: ConfigProvider
-    @EnvironmentObject var viewModel: SpacesViewModel
+    @Environment(SpacesViewModel.self) private var viewModel
 
     var config: ConfigData { configProvider.config }
     var spaceConfig: ConfigData { config["space"]?.dictionaryValue ?? [:] }
@@ -185,7 +139,7 @@ private struct SpaceView: View {
 /// This view shows a window and its icon.
 private struct WindowView: View {
     @EnvironmentObject var configProvider: ConfigProvider
-    @EnvironmentObject var viewModel: SpacesViewModel
+    @Environment(SpacesViewModel.self) private var viewModel
 
     var config: ConfigData { configProvider.config }
     var windowConfig: ConfigData { config["window"]?.dictionaryValue ?? [:] }
@@ -211,7 +165,9 @@ private struct WindowView: View {
         let spaceIsFocused = space.windows.contains { $0.isFocused }
         HStack {
             ZStack {
-                if let icon = window.appIcon {
+                if let appName = window.appName,
+                    let icon = IconCache.shared.icon(for: appName)
+                {
                     Image(nsImage: icon)
                         .resizable()
                         .frame(width: size, height: size)
@@ -250,9 +206,7 @@ private struct WindowView: View {
         .frame(height: 30)
         .contentShape(Rectangle())
         .onTapGesture {
-            viewModel.switchToSpace(space)
-            usleep(100_000)
-            viewModel.switchToWindow(window)
+            viewModel.switchToWindow(window, in: space)
         }
         .onHover { value in
             isHovered = value

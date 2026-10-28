@@ -1,112 +1,178 @@
 import AppKit
-import Foundation
+import Observation
 
-class SpacesViewModel: ObservableObject {
-    @Published var spaces: [AnySpace] = []
-    private var timer: Timer?
-    private var provider: AnySpacesProvider?
-    private var isLoading = false
+@MainActor
+@Observable
+final class SpacesViewModel {
+    private(set) var spaces: [AnySpace] = []
+
+    /// Left edge (screen X) of the area occupied by the notch or a notch
+    /// overlay app such as BoringNotch. `nil` when there is no notch.
+    private(set) var notchLeftBoundary: CGFloat?
+
+    @ObservationIgnored private let provider: (any SpacesProvider)?
+    @ObservationIgnored private var pollTask: Task<Void, Never>?
+    @ObservationIgnored private var notchTask: Task<Void, Never>?
+    @ObservationIgnored private var spaceObserver: (any NSObjectProtocol)?
+    @ObservationIgnored private var isLoading = false
+
+    /// Focus commands are chained so they run strictly in the order the user
+    /// issued them. Otherwise a later `workspace` command could land after
+    /// `focus --window-id` and steal focus back from the clicked window.
+    @ObservationIgnored private var lastCommand: Task<Void, Never>?
 
     init() {
         let runningApps = NSWorkspace.shared.runningApplications.compactMap {
             $0.localizedName?.lowercased()
         }
+        let config = ConfigManager.shared.config
         if runningApps.contains("yabai") {
-            provider = AnySpacesProvider(YabaiSpacesProvider())
+            provider = YabaiSpacesProvider(executablePath: config.yabai.path)
         } else if runningApps.contains("aerospace") {
-            provider = AnySpacesProvider(AerospaceSpacesProvider())
+            provider = AerospaceSpacesProvider(
+                executablePath: config.aerospace.path)
         } else {
             provider = nil
         }
-        startMonitoring()
-
-        // Refresh immediately when the user switches spaces — avoids waiting for the next tick.
-        NSWorkspace.shared.notificationCenter.addObserver(
-            self,
-            selector: #selector(handleActiveSpaceChange),
-            name: NSWorkspace.activeSpaceDidChangeNotification,
-            object: nil)
     }
 
-    deinit {
-        stopMonitoring()
-        NSWorkspace.shared.notificationCenter.removeObserver(self)
-    }
+    // MARK: - Lifecycle
 
-    @objc private func handleActiveSpaceChange() {
-        loadSpaces()
-    }
+    func start() {
+        guard pollTask == nil else { return }
 
-    private func startMonitoring() {
-        // 0.5s is the safety-net tick. Space switches fire activeSpaceDidChange
-        // immediately, so this only catches things like window-list changes
-        // that don't post notifications.
-        timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) {
-            [weak self] _ in
-            self?.loadSpaces()
+        // Refresh immediately on space switches instead of waiting for a tick.
+        spaceObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.activeSpaceDidChangeNotification,
+            object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.refresh() }
         }
-        loadSpaces()
+
+        // 0.5s safety-net tick for changes that post no notification
+        // (window opened/closed, title changes, …).
+        pollTask = Task { [weak self] in
+            // The loops hold `self` weakly so they end once the view model
+            // is released, even if `stop()` was never called.
+            while !Task.isCancelled, let self {
+                self.refresh()
+                try? await Task.sleep(for: .milliseconds(500))
+            }
+        }
+
+        notchTask = Task { [weak self] in
+            while !Task.isCancelled, let self {
+                await self.updateNotchBoundary()
+                try? await Task.sleep(for: .seconds(3))
+            }
+        }
     }
 
-    private func stopMonitoring() {
-        timer?.invalidate()
-        timer = nil
+    func stop() {
+        pollTask?.cancel()
+        pollTask = nil
+        notchTask?.cancel()
+        notchTask = nil
+        if let spaceObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(spaceObserver)
+            self.spaceObserver = nil
+        }
     }
 
-    private func loadSpaces() {
-        // isLoading is read/written only on main — no race.
-        assert(Thread.isMainThread)
-        guard !isLoading else { return }
-        guard let provider = provider else { return }
+    // MARK: - Loading
+
+    private func refresh() {
+        guard !isLoading, let provider else { return }
         isLoading = true
-        DispatchQueue.global(qos: .utility).async {
-            let fetched = provider.getSpacesWithWindows()
-            let sortedSpaces: [AnySpace] = (fetched ?? []).sorted { space1, space2 in
-                if let id1 = Int(space1.id), let id2 = Int(space2.id) {
-                    return id1 < id2
-                }
-                return space1.id < space2.id
+        Task {
+            defer { isLoading = false }
+            guard let fetched = await provider.getSpacesWithWindows() else {
+                return
             }
-            DispatchQueue.main.async { [weak self] in
-                guard let self else { return }
-                self.spaces = sortedSpaces
-                self.isLoading = false
+            let sorted = fetched.sorted { lhs, rhs in
+                if let l = Int(lhs.id), let r = Int(rhs.id) { return l < r }
+                return lhs.id < rhs.id
             }
+            // Avoid invalidating views when nothing changed.
+            if sorted != spaces { spaces = sorted }
         }
     }
+
+    // MARK: - Commands
 
     func switchToSpace(_ space: AnySpace, needWindowFocus: Bool = false) {
-        DispatchQueue.global(qos: .userInitiated).async {
-            self.provider?.focusSpace(
+        enqueue { provider in
+            await provider.focusSpace(
                 spaceId: space.id, needWindowFocus: needWindowFocus)
         }
     }
 
-    func switchToWindow(_ window: AnyWindow) {
-        DispatchQueue.global(qos: .userInitiated).async {
-            self.provider?.focusWindow(windowId: String(window.id))
+    /// Switches to `space` and then focuses `window`, strictly in that order.
+    func switchToWindow(_ window: AnyWindow, in space: AnySpace) {
+        enqueue { provider in
+            await provider.focusSpace(spaceId: space.id, needWindowFocus: false)
+            await provider.focusWindow(windowId: String(window.id))
         }
     }
-}
 
-class IconCache {
-    static let shared = IconCache()
-    private let cache = NSCache<NSString, NSImage>()
-    private init() {}
-    func icon(for appName: String) -> NSImage? {
-        if let cached = cache.object(forKey: appName as NSString) {
-            return cached
+    private func enqueue(
+        _ command: @escaping @Sendable (any SpacesProvider) async -> Void
+    ) {
+        guard let provider else { return }
+        let previous = lastCommand
+        lastCommand = Task {
+            await previous?.value
+            await command(provider)
+            // Reflect the new focus right away.
+            refresh()
         }
-        let workspace = NSWorkspace.shared
-        if let app = workspace.runningApplications.first(where: {
-            $0.localizedName == appName
-        }),
-            let bundleURL = app.bundleURL
+    }
+
+    // MARK: - Notch boundary
+
+    private func updateNotchBoundary() async {
+        let boringNotchPID = NSWorkspace.shared.runningApplications.first {
+            let name = ($0.localizedName ?? "").lowercased()
+            let bundle = ($0.bundleIdentifier ?? "").lowercased()
+            return name.contains("boringnotch") || name.contains("boring notch")
+                || bundle.contains("boringnotch")
+                || bundle.contains("boring-notch")
+        }?.processIdentifier
+
+        var boundary: CGFloat?
+        if let boringNotchPID {
+            boundary = await Self.menuBarWindowMinX(pid: boringNotchPID)
+        }
+        if boundary == nil,
+            let area = NSScreen.main?.auxiliaryTopLeftArea, area.width > 0
         {
-            let icon = workspace.icon(forFile: bundleURL.path)
-            cache.setObject(icon, forKey: appName as NSString)
-            return icon
+            boundary = area.maxX
         }
-        return nil
+        if boundary != notchLeftBoundary { notchLeftBoundary = boundary }
+    }
+
+    /// Left edge of the given process's widest window sitting in the menu bar
+    /// area. Querying the window server is comparatively expensive, so it runs
+    /// off the main actor.
+    @concurrent
+    private nonisolated static func menuBarWindowMinX(pid: pid_t) async
+        -> CGFloat?
+    {
+        guard
+            let infoList = CGWindowListCopyWindowInfo(
+                [.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]]
+        else { return nil }
+
+        return infoList.compactMap { info -> CGFloat? in
+            guard
+                info[kCGWindowOwnerPID as String] as? pid_t == pid,
+                let boundsDict = info[kCGWindowBounds as String]
+                    as? NSDictionary,
+                let bounds = CGRect(dictionaryRepresentation: boundsDict),
+                // Quartz coordinates: Y = 0 is the top of the primary screen.
+                bounds.minY < 50, bounds.height < 120, bounds.width > 50
+            else { return nil }
+            return bounds.minX
+        }.min()
     }
 }

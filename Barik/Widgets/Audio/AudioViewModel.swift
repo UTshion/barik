@@ -1,43 +1,44 @@
 import AppKit
 import CoreAudio
 import Foundation
+import Observation
 
 /// View model for monitoring and controlling audio input/output devices.
 ///
 /// All queries and mutations go through the Core Audio HAL — no subprocesses.
 /// Updates are pushed via Core Audio property listeners, with a coarse safety-net
 /// timer (30s) only to catch missed events.
-class AudioViewModel: ObservableObject {
-    @Published var outputVolume: Float = 0.0
-    @Published var inputVolume: Float = 0.0
-    @Published var outputDevices: [AudioDevice] = []
-    @Published var inputDevices: [AudioDevice] = []
-    @Published var selectedOutputDevice: AudioDevice?
-    @Published var selectedInputDevice: AudioDevice?
-    @Published var isMuted: Bool = false
+///
+/// Shared by every bar and popup so Core Audio listeners are installed once.
+@MainActor
+@Observable
+final class AudioViewModel {
+    static let shared = AudioViewModel()
 
-    private var globalListeners = CoreAudioListenerToken()
-    private var outputDeviceListeners = CoreAudioListenerToken()
-    private var inputDeviceListeners = CoreAudioListenerToken()
-    private var currentOutputDeviceID: AudioObjectID?
-    private var currentInputDeviceID: AudioObjectID?
+    var outputVolume: Float = 0.0
+    var inputVolume: Float = 0.0
+    var outputDevices: [AudioDevice] = []
+    var inputDevices: [AudioDevice] = []
+    var selectedOutputDevice: AudioDevice?
+    var selectedInputDevice: AudioDevice?
+    var isMuted: Bool = false
 
-    private var safetyTimer: Timer?
+    @ObservationIgnored private var globalListeners = CoreAudioListenerToken()
+    @ObservationIgnored private var outputDeviceListeners = CoreAudioListenerToken()
+    @ObservationIgnored private var inputDeviceListeners = CoreAudioListenerToken()
+    @ObservationIgnored private var currentOutputDeviceID: AudioObjectID?
+    @ObservationIgnored private var currentInputDeviceID: AudioObjectID?
 
-    init() {
+    private init() {
         refreshAll()
         installGlobalListeners()
         // Safety net: cheap, only invokes property reads — no subprocesses.
-        safetyTimer = Timer.scheduledTimer(withTimeInterval: 30.0, repeats: true) { [weak self] _ in
-            self?.refreshAll()
+        Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(30))
+                self?.refreshAll()
+            }
         }
-    }
-
-    deinit {
-        safetyTimer?.invalidate()
-        globalListeners.removeAll()
-        outputDeviceListeners.removeAll()
-        inputDeviceListeners.removeAll()
     }
 
     // MARK: - Listener setup
@@ -220,7 +221,7 @@ class AudioViewModel: ObservableObject {
 
     func selectInputDevice(_ device: AudioDevice) {
         selectedInputDevice = device
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+        DispatchQueue.global(qos: .userInitiated).async {
             let success = CoreAudioHelpers.setDefaultDevice(
                 device.audioObjectID, scope: .input)
             DispatchQueue.main.async {
@@ -228,7 +229,6 @@ class AudioViewModel: ObservableObject {
                     if let url = URL(string: "x-apple.systempreferences:com.apple.preference.sound?Input") {
                         NSWorkspace.shared.open(url)
                     }
-                    _ = self  // silence unused-capture warning
                 }
             }
         }
@@ -255,14 +255,14 @@ class AudioViewModel: ObservableObject {
     }
 }
 
-struct AudioDevice: Identifiable, Equatable {
+nonisolated struct AudioDevice: Identifiable, Equatable, Sendable {
     let id: String
     let name: String
     let type: AudioDeviceType
     let audioObjectID: AudioObjectID
 }
 
-enum AudioDeviceType {
+nonisolated enum AudioDeviceType: Sendable {
     case input
     case output
 }

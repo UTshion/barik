@@ -2,7 +2,7 @@ import SwiftUI
 
 /// Window displaying detailed network status information.
 struct NetworkPopup: View {
-    @StateObject private var viewModel = NetworkStatusViewModel()
+    private let viewModel = NetworkStatusViewModel.shared
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {

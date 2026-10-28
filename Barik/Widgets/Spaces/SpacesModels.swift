@@ -1,105 +1,76 @@
 import AppKit
 
-protocol SpaceModel: Identifiable, Equatable, Codable {
+nonisolated protocol SpaceModel: Identifiable, Equatable, Decodable, Sendable {
     associatedtype WindowType: WindowModel
+    /// Identifier passed back to the window manager to focus this space.
+    var spaceId: String { get }
     var isFocused: Bool { get set }
     var windows: [WindowType] { get set }
 }
 
-protocol WindowModel: Identifiable, Equatable, Codable {
+nonisolated protocol WindowModel: Identifiable, Equatable, Decodable, Sendable {
     var id: Int { get }
     var title: String { get }
     var appName: String? { get }
     var isFocused: Bool { get }
-    var appIcon: NSImage? { get set }
 }
 
-protocol SpacesProvider {
-    associatedtype SpaceType: SpaceModel
-    func getSpacesWithWindows() -> [SpaceType]?
+/// A window manager backend (yabai, AeroSpace, …).
+///
+/// Implementations run their CLI calls through `SubprocessRunner`'s async API,
+/// so none of these methods block the main actor or the cooperative pool.
+nonisolated protocol SpacesProvider: Sendable {
+    @concurrent func getSpacesWithWindows() async -> [AnySpace]?
+    @concurrent func focusSpace(spaceId: String, needWindowFocus: Bool) async
+    @concurrent func focusWindow(windowId: String) async
 }
 
-protocol SwitchableSpacesProvider: SpacesProvider {
-    func focusSpace(spaceId: String, needWindowFocus: Bool)
-    func focusWindow(windowId: String)
-}
-
-struct AnyWindow: Identifiable, Equatable {
+nonisolated struct AnyWindow: Identifiable, Equatable, Sendable {
     let id: Int
     let title: String
     let appName: String?
     let isFocused: Bool
-    let appIcon: NSImage?
 
     init<W: WindowModel>(_ window: W) {
         self.id = window.id
         self.title = window.title
         self.appName = window.appName
         self.isFocused = window.isFocused
-        self.appIcon = window.appIcon
-    }
-
-    static func == (lhs: AnyWindow, rhs: AnyWindow) -> Bool {
-        return lhs.id == rhs.id && lhs.title == rhs.title
-            && lhs.appName == rhs.appName && lhs.isFocused == rhs.isFocused
     }
 }
 
-struct AnySpace: Identifiable, Equatable {
+nonisolated struct AnySpace: Identifiable, Equatable, Sendable {
     let id: String
     let isFocused: Bool
     let windows: [AnyWindow]
 
     init<S: SpaceModel>(_ space: S) {
-        if let aero = space as? AeroSpace {
-            self.id = aero.workspace
-        } else if let yabai = space as? YabaiSpace {
-            self.id = String(yabai.id)
-        } else {
-            self.id = "0"
-        }
+        self.id = space.spaceId
         self.isFocused = space.isFocused
         self.windows = space.windows.map { AnyWindow($0) }
     }
-
-    static func == (lhs: AnySpace, rhs: AnySpace) -> Bool {
-        return lhs.id == rhs.id && lhs.isFocused == rhs.isFocused
-            && lhs.windows == rhs.windows
-    }
 }
 
-class AnySpacesProvider {
-    private let _getSpacesWithWindows: () -> [AnySpace]?
-    private let _focusSpace: ((String, Bool) -> Void)?
-    private let _focusWindow: ((String) -> Void)?
+/// Resolves and caches application icons by app name.
+@MainActor
+final class IconCache {
+    static let shared = IconCache()
+    private let cache = NSCache<NSString, NSImage>()
+    private init() {}
 
-    init<P: SpacesProvider>(_ provider: P) {
-        _getSpacesWithWindows = {
-            provider.getSpacesWithWindows()?.map { AnySpace($0) }
+    func icon(for appName: String) -> NSImage? {
+        if let cached = cache.object(forKey: appName as NSString) {
+            return cached
         }
-        if let switchable = provider as? any SwitchableSpacesProvider {
-            _focusSpace = { spaceId, needWindowFocus in
-                switchable.focusSpace(
-                    spaceId: spaceId, needWindowFocus: needWindowFocus)
-            }
-            _focusWindow = { windowId in
-                switchable.focusWindow(windowId: windowId)
-            }
-        } else {
-            _focusSpace = nil
-            _focusWindow = nil
-        }
-    }
-
-    func getSpacesWithWindows() -> [AnySpace]? {
-        _getSpacesWithWindows()
-    }
-
-    func focusSpace(spaceId: String, needWindowFocus: Bool) {
-        _focusSpace?(spaceId, needWindowFocus)
-    }
-
-    func focusWindow(windowId: String) {
-        _focusWindow?(windowId)
+        let workspace = NSWorkspace.shared
+        guard
+            let app = workspace.runningApplications.first(where: {
+                $0.localizedName == appName
+            }),
+            let bundleURL = app.bundleURL
+        else { return nil }
+        let icon = workspace.icon(forFile: bundleURL.path)
+        cache.setObject(icon, forKey: appName as NSString)
+        return icon
     }
 }

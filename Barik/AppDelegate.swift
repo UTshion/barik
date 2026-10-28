@@ -114,15 +114,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         for screen in screens {
             let key = screen.barikDisplayKey
+
+            // On displays where macOS reserves the top strip (a notch, or a
+            // persistent menu bar), keep the blurred background beneath windows
+            // so it fills that reserved area like the real menu bar does. On
+            // displays that reserve nothing — e.g. an external screen while
+            // "Automatically hide and show the menu bar" is on — float it above
+            // windows so the bar stays visible instead of being covered.
+            let reservesTopArea = screen.barikTopInset >= 1
+            let normalLevel = Int(CGWindowLevelForKey(.normalWindow))
+            let backgroundLevel =
+                reservesTopArea
+                ? Int(CGWindowLevelForKey(.desktopWindow)) : normalLevel + 1
+
+            // The foreground bar must sit above the system menu bar. Since
+            // macOS 26 the menu bar is drawn by MenuBarAgent as a transparent,
+            // full-width window at the status level; anything below it shows
+            // through visually but never receives clicks. One level above it
+            // keeps Barik clickable while staying below notch overlays (e.g.
+            // BoringNotch) and real menus. Transparent parts of the bar let
+            // clicks fall through to the native menu bar underneath.
+            let menuBarLevel = Int(CGWindowLevelForKey(.statusWindow)) + 1
+
             setupPanel(
                 &backgroundPanels[key],
                 frame: screen.frame,
-                level: Int(CGWindowLevelForKey(.desktopWindow)),
+                level: backgroundLevel,
                 hostingRootView: AnyView(BackgroundView(displayKey: key)))
             setupPanel(
                 &menuBarPanels[key],
                 frame: screen.frame,
-                level: Int(CGWindowLevelForKey(.backstopMenu)),
+                level: menuBarLevel,
                 hostingRootView: AnyView(MenuBarView(displayKey: key)))
         }
     }
@@ -151,7 +173,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         newPanel.backgroundColor = .clear
         newPanel.hasShadow = false
         newPanel.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
-        newPanel.contentView = NSHostingView(rootView: hostingRootView)
+        newPanel.contentView = FirstMouseHostingView(rootView: hostingRootView)
         newPanel.orderFront(nil)
         panel = newPanel
     }

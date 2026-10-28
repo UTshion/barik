@@ -1,97 +1,85 @@
 import Foundation
+import os
 
-class YabaiSpacesProvider: SpacesProvider, SwitchableSpacesProvider {
-    typealias SpaceType = YabaiSpace
-    let executablePath = ConfigManager.shared.config.yabai.path
-
+nonisolated final class YabaiSpacesProvider: SpacesProvider {
+    private let executablePath: String
     private static let timeout: TimeInterval = 3.0
+    private static let logger = Logger(
+        subsystem: Bundle.main.bundleIdentifier ?? "app.barik",
+        category: "YabaiProvider")
 
-    private func runYabaiCommand(arguments: [String]) -> Data? {
+    init(executablePath: String) {
+        self.executablePath = executablePath
+    }
+
+    @concurrent func getSpacesWithWindows() async -> [AnySpace]? {
+        await fetchSpacesWithWindows()?.map { AnySpace($0) }
+    }
+
+    @concurrent func focusSpace(spaceId: String, needWindowFocus: Bool) async {
+        _ = await run(["-m", "space", "--focus", spaceId])
+        guard needWindowFocus else { return }
+
+        // Give yabai a moment to settle, then focus the first window if the
+        // space came up without a focused one.
+        try? await Task.sleep(for: .milliseconds(100))
         guard
-            let result = SubprocessRunner.run(
-                executable: executablePath,
-                arguments: arguments,
-                timeout: Self.timeout)
-        else {
-            return nil
+            let space = await fetchSpacesWithWindows()?.first(where: {
+                $0.id == Int(spaceId)
+            }),
+            !space.windows.contains(where: \.isFocused),
+            let firstWindow = space.windows.first
+        else { return }
+        _ = await run(["-m", "window", "--focus", String(firstWindow.id)])
+    }
+
+    @concurrent func focusWindow(windowId: String) async {
+        _ = await run(["-m", "window", "--focus", windowId])
+    }
+
+    private func fetchSpacesWithWindows() async -> [YabaiSpace]? {
+        async let spacesTask: [YabaiSpace]? = decode(
+            ["-m", "query", "--spaces"])
+        async let windowsTask: [YabaiWindow]? = decode(
+            ["-m", "query", "--windows"])
+        guard let spaces = await spacesTask, let windows = await windowsTask
+        else { return nil }
+
+        var spaceDict = Dictionary(
+            spaces.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        for window in windows
+        where !(window.isHidden || window.isFloating || window.isSticky) {
+            spaceDict[window.spaceId]?.windows.append(window)
         }
-        if result.timedOut || result.exitCode != 0 {
-            return nil
-        }
+        return spaceDict.values
+            .filter { !$0.windows.isEmpty }
+            .map { space in
+                var space = space
+                space.windows.sort { $0.stackIndex < $1.stackIndex }
+                return space
+            }
+    }
+
+    private func run(_ arguments: [String]) async -> Data? {
+        guard
+            let result = await SubprocessRunner.run(
+                executable: executablePath, arguments: arguments,
+                timeout: Self.timeout),
+            !result.timedOut, result.exitCode == 0
+        else { return nil }
         return result.stdout
     }
 
-    private func fetchSpaces() -> [YabaiSpace]? {
-        guard
-            let data = runYabaiCommand(arguments: ["-m", "query", "--spaces"])
-        else {
-            return nil
-        }
+    private func decode<T: Decodable>(_ arguments: [String]) async -> T? {
+        // Empty output means "nothing matched" (e.g. no focused window).
+        guard let data = await run(arguments), !data.isEmpty else { return nil }
         do {
-            return try JSONDecoder().decode([YabaiSpace].self, from: data)
+            return try JSONDecoder().decode(T.self, from: data)
         } catch {
-            print("Decode yabai spaces error: \(error)")
+            Self.logger.error(
+                "Decode error for \(arguments.joined(separator: " "), privacy: .public): \(error.localizedDescription, privacy: .public)"
+            )
             return nil
         }
-    }
-
-    private func fetchWindows() -> [YabaiWindow]? {
-        guard
-            let data = runYabaiCommand(arguments: ["-m", "query", "--windows"])
-        else {
-            return nil
-        }
-        do {
-            return try JSONDecoder().decode([YabaiWindow].self, from: data)
-        } catch {
-            print("Decode yabai windows error: \(error)")
-            return nil
-        }
-    }
-
-    func getSpacesWithWindows() -> [YabaiSpace]? {
-        guard let spaces = fetchSpaces(), let windows = fetchWindows() else {
-            return nil
-        }
-        let filteredWindows = windows.filter {
-            !($0.isHidden || $0.isFloating || $0.isSticky)
-        }
-        var spaceDict = Dictionary(
-            uniqueKeysWithValues: spaces.map { ($0.id, $0) })
-        for window in filteredWindows {
-            if var space = spaceDict[window.spaceId] {
-                space.windows.append(window)
-                spaceDict[window.spaceId] = space
-            }
-        }
-        var resultSpaces = Array(spaceDict.values)
-        for i in 0..<resultSpaces.count {
-            resultSpaces[i].windows.sort { $0.stackIndex < $1.stackIndex }
-        }
-        return resultSpaces.filter { !$0.windows.isEmpty }
-    }
-
-    func focusSpace(spaceId: String, needWindowFocus: Bool) {
-        _ = runYabaiCommand(arguments: ["-m", "space", "--focus", spaceId])
-        if !needWindowFocus { return }
-
-        DispatchQueue.global(qos: .userInitiated).asyncAfter(
-            deadline: .now() + 0.1
-        ) {
-            if let spaces = self.getSpacesWithWindows() {
-                if let space = spaces.first(where: { $0.id == Int(spaceId) }) {
-                    let hasFocused = space.windows.contains { $0.isFocused }
-                    if !hasFocused, let firstWindow = space.windows.first {
-                        _ = self.runYabaiCommand(arguments: [
-                            "-m", "window", "--focus", String(firstWindow.id),
-                        ])
-                    }
-                }
-            }
-        }
-    }
-
-    func focusWindow(windowId: String) {
-        _ = runYabaiCommand(arguments: ["-m", "window", "--focus", windowId])
     }
 }
