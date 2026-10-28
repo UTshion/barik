@@ -89,6 +89,14 @@ struct MenuBarView: View {
 
         Divider()
 
+        Toggle(
+            "Launch at Login",
+            isOn: Binding(
+                get: { LoginItem.isEnabled },
+                set: { LoginItem.setEnabled($0) }))
+
+        Divider()
+
         Button("Restart Barik") { BarikAppControl.restart() }
         Button("Quit Barik") { BarikAppControl.quit() }
     }
