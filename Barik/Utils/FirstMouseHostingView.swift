@@ -8,27 +8,15 @@ import SwiftUI
 /// (e.g. the window icons in the spaces widget) ignore the first — and in
 /// practice every — click. Accepting first mouse and opting the hierarchy into
 /// activation events restores click-through behavior.
-final class FirstMouseHostingView<Content: View>: NSHostingView<
-    FirstMouseHostingView.Root
->
-{
-    struct Root: View {
-        let content: Content
-
-        var body: some View {
-            if #available(macOS 15.0, *) {
-                content.allowsWindowActivationEvents()
-            } else {
-                content
-            }
-        }
+///
+/// The view is not generic. Swift 6.3's Release inliner crashes while
+/// optimizing the synthesized deinit of a generic `NSHostingView` subclass.
+final class FirstMouseHostingView: NSHostingView<AnyView> {
+    init<Content: View>(rootView: Content) {
+        super.init(rootView: AnyView(ActivationRoot(content: rootView)))
     }
 
-    init(rootView: Content) {
-        super.init(rootView: Root(content: rootView))
-    }
-
-    @MainActor required init(rootView: Root) {
+    @MainActor required init(rootView: AnyView) {
         super.init(rootView: rootView)
     }
 
@@ -38,5 +26,17 @@ final class FirstMouseHostingView<Content: View>: NSHostingView<
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
         true
+    }
+}
+
+private struct ActivationRoot<Content: View>: View {
+    let content: Content
+
+    var body: some View {
+        if #available(macOS 15.0, *) {
+            content.allowsWindowActivationEvents()
+        } else {
+            content
+        }
     }
 }
