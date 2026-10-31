@@ -140,6 +140,7 @@ private struct SpaceView: View {
     var spaceConfig: ConfigData { config["space"]?.dictionaryValue ?? [:] }
 
     @ObservedObject var configManager = ConfigManager.shared
+    @Environment(\.barikWidgetHeight) private var widgetHeight
     var foregroundHeight: CGFloat { configManager.config.experimental.foreground.resolveHeight() }
 
     var showKey: Bool { spaceConfig["show-key"]?.boolValue ?? true }
@@ -173,7 +174,7 @@ private struct SpaceView: View {
             }
             Spacer().frame(width: 10)
         }
-        .frame(height: 30)
+        .frame(height: widgetHeight)
         .background(
             foregroundHeight < 30 ?
             (isFocused
@@ -214,11 +215,14 @@ private struct WindowView: View {
     let window: AnyWindow
     let space: AnySpace
 
+    @Environment(\.barikWidgetHeight) private var widgetHeight
     @State var isHovered = false
 
     var body: some View {
         let titleMaxLength = maxLength
-        let size: CGFloat = 21
+        // 21pt icon in a 30pt pill. Shorter pills shrink the icon only as
+        // much as needed to fit it plus its 2pt padding and a 1pt margin.
+        let size: CGFloat = min(21, widgetHeight - 5)
         let sameAppCount = space.windows.filter { $0.appName == window.appName }
             .count
         let title = sameAppCount > 1 && !alwaysDisplayAppTitleFor.contains { $0 == window.appName } ? window.title : (window.appName ?? "")
@@ -263,7 +267,7 @@ private struct WindowView: View {
         .background(isHovered || (!showTitle && window.isFocused) ? .selected : .clear)
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         .animation(.smooth, value: isHovered)
-        .frame(height: 30)
+        .frame(height: widgetHeight)
         .contentShape(Rectangle())
         .onTapGesture {
             viewModel.switchToWindow(window, in: space)
