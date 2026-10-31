@@ -11,6 +11,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var backgroundPanels: [String: NSPanel] = [:]
     private var menuBarPanels: [String: NSPanel] = [:]
 
+    /// Lowers the bar beneath the system menu bar while macOS reveals an
+    /// auto-hidden menu bar, so the native one is on top and clickable.
+    private let menuBarRevealMonitor = MenuBarRevealMonitor()
+
+    /// Displays where Barik currently sits beneath the system menu bar. Kept
+    /// separately from the monitor's state so raising back can be delayed.
+    private var loweredDisplayKeys: Set<String> = []
+    private var pendingMenuBarRestore: DispatchWorkItem?
+
     private var statusItem: NSStatusItem?
     private weak var displaysMenu: NSMenu?
     private weak var statusMenu: NSMenu?
@@ -42,6 +51,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         setupStatusItem()
         setupPanels()
         LoginItem.registerByDefaultIfNeeded()
+
+        menuBarRevealMonitor.onChange = { [weak self] revealed in
+            self?.menuBarRevealDidChange(revealed)
+        }
+        menuBarRevealMonitor.start()
 
         NotificationCenter.default.addObserver(
             self,
@@ -130,15 +144,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 reservesTopArea
                 ? Int(CGWindowLevelForKey(.desktopWindow)) : normalLevel + 1
 
-            // The foreground bar must sit above the system menu bar. Since
-            // macOS 26 the menu bar is drawn by MenuBarAgent as a transparent,
-            // full-width window at the status level; anything below it shows
-            // through visually but never receives clicks. One level above it
-            // keeps Barik clickable while staying below notch overlays (e.g.
-            // BoringNotch) and real menus. Transparent parts of the bar let
-            // clicks fall through to the native menu bar underneath.
-            let menuBarLevel = Int(CGWindowLevelForKey(.statusWindow)) + 1
-
             setupPanel(
                 &backgroundPanels[key],
                 frame: screen.frame,
@@ -147,8 +152,59 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             setupPanel(
                 &menuBarPanels[key],
                 frame: screen.frame,
-                level: menuBarLevel,
+                level: menuBarLevel(for: key),
                 hostingRootView: AnyView(MenuBarView(displayKey: key)))
+        }
+    }
+
+    /// Window level for the foreground bar on the display identified by `key`.
+    private func menuBarLevel(for key: String) -> Int {
+        // While an auto-hidden system menu bar is revealed on this display,
+        // drop below it so the native menu bar is drawn on top and gets clicks.
+        if loweredDisplayKeys.contains(key) {
+            return Int(CGWindowLevelForKey(.mainMenuWindow)) - 1
+        }
+        // Otherwise the bar must sit above the system menu bar. Since
+        // macOS 26 the menu bar is drawn by MenuBarAgent as a transparent,
+        // full-width window at the status level; anything below it shows
+        // through visually but never receives clicks. One level above it
+        // keeps Barik clickable while staying below notch overlays (e.g.
+        // BoringNotch) and real menus. Transparent parts of the bar let
+        // clicks fall through to the native menu bar underneath.
+        return Int(CGWindowLevelForKey(.statusWindow)) + 1
+    }
+
+    /// Lowers Barik as soon as the system menu bar is revealed, but waits
+    /// `menu-bar-restore-delay` before raising it again so the menu bar can
+    /// finish its slide-out animation without overlapping Barik.
+    private func menuBarRevealDidChange(_ revealed: Set<String>) {
+        pendingMenuBarRestore?.cancel()
+        pendingMenuBarRestore = nil
+
+        // Newly revealed displays drop below the menu bar immediately.
+        loweredDisplayKeys.formUnion(revealed)
+        applyMenuBarLevels()
+
+        guard loweredDisplayKeys != revealed else { return }
+        let delay = ConfigManager.shared.config.experimental.foreground
+            .menuBarRestoreDelay
+        let restore = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.loweredDisplayKeys = self.menuBarRevealMonitor.revealedKeys
+            self.applyMenuBarLevels()
+        }
+        pendingMenuBarRestore = restore
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + .milliseconds(delay), execute: restore)
+    }
+
+    /// Re-applies the foreground bar level on every display.
+    private func applyMenuBarLevels() {
+        for (key, panel) in menuBarPanels {
+            let level = NSWindow.Level(rawValue: menuBarLevel(for: key))
+            if panel.level != level {
+                panel.level = level
+            }
         }
     }
 

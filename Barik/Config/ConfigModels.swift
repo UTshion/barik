@@ -271,12 +271,16 @@ struct ForegroundConfig: Decodable {
     let horizontalPadding: CGFloat
     let widgetsBackground: WidgetBackgroundConfig
     let spacing: CGFloat
-    
+    /// Delay (ms) before Barik is raised again after the auto-hidden system
+    /// menu bar hides. See `Constants.menuBarRestoreDelayInMilliseconds`.
+    let menuBarRestoreDelay: Int
+
     init() {
         self.height = .barikDefault
         self.horizontalPadding = Constants.menuBarHorizontalPadding
         self.widgetsBackground = WidgetBackgroundConfig()
         self.spacing = 15
+        self.menuBarRestoreDelay = Constants.menuBarRestoreDelayInMilliseconds
     }
     
     init(from decoder: Decoder) throws {
@@ -285,13 +289,15 @@ struct ForegroundConfig: Decodable {
         horizontalPadding = try container.decodeIfPresent(CGFloat.self, forKey: .horizontalPadding) ?? Constants.menuBarHorizontalPadding
         widgetsBackground = try container.decodeIfPresent(WidgetBackgroundConfig.self, forKey: .widgetsBackground) ?? WidgetBackgroundConfig()
         spacing = try container.decodeIfPresent(CGFloat.self, forKey: .spacing) ?? 15
+        menuBarRestoreDelay = max(0, try container.decodeIfPresent(Int.self, forKey: .menuBarRestoreDelay) ?? Constants.menuBarRestoreDelayInMilliseconds)
     }
-    
+
     enum CodingKeys: String, CodingKey {
         case height
         case horizontalPadding = "horizontal-padding"
         case widgetsBackground = "widgets-background"
         case spacing
+        case menuBarRestoreDelay = "menu-bar-restore-delay"
     }
     
     func resolveHeight(for screen: NSScreen? = nil) -> CGFloat {
