@@ -79,7 +79,10 @@ final class MenuBarRevealMonitor {
 
     /// Height of the revealed system menu bar on `screen`.
     private static func menuBarHeight(on screen: NSScreen) -> CGFloat {
-        max(
+        if let measured = MenuBarHeightStore.shared.heights[screen.barikDisplayKey] {
+            return measured
+        }
+        return max(
             NSStatusBar.system.thickness,
             NSApp.mainMenu?.menuBarHeight ?? 0,
             screen.safeAreaInsets.top)

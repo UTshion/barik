@@ -2,6 +2,7 @@ import SwiftUI
 
 struct BackgroundView: View {
     @ObservedObject var configManager = ConfigManager.shared
+    @ObservedObject var menuBarHeights = MenuBarHeightStore.shared
 
     /// The display this background is rendered on, used to size it to that
     /// screen's system menu bar height. `nil` falls back to the main screen.

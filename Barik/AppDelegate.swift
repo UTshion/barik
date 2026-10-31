@@ -130,6 +130,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// currently targeted display, tearing down panels for displays that are
     /// no longer selected or connected.
     private func setupPanels() {
+        // Size each bar to its own display's menu bar before (re)building.
+        MenuBarHeightStore.shared.refresh()
+
         let screens = DisplaySelectionStore.shared.targetScreens()
         let wantedKeys = Set(screens.map { $0.barikDisplayKey })
 
