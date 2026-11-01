@@ -1,9 +1,16 @@
 import SwiftUI
 
+extension EnvironmentValues {
+    /// Height available to widget backgrounds (e.g. the spaces pills) on the
+    /// display the bar is rendered on. Set per display by `MenuBarView`.
+    @Entry var barikWidgetHeight: CGFloat = Constants.widgetContentHeight
+}
+
 private struct ExperimentalConfigurationModifier: ViewModifier {
     @ObservedObject var configManager = ConfigManager.shared
+    @Environment(\.barikWidgetHeight) private var widgetHeight
     var foregroundHeight: CGFloat { configManager.config.experimental.foreground.resolveHeight() }
-    
+
     let horizontalPadding: CGFloat
     let cornerRadius: CGFloat
     
@@ -13,7 +20,7 @@ private struct ExperimentalConfigurationModifier: ViewModifier {
                 content
             } else {
                 content
-                    .frame(height: foregroundHeight < 45 ? 30 : 38)
+                    .frame(height: foregroundHeight < 45 ? widgetHeight : 38)
                     .padding(.horizontal, foregroundHeight < 45 && horizontalPadding != 15 ? 0 :
                                 foregroundHeight < 30 ? 0 : horizontalPadding
                     )

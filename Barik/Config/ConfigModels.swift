@@ -274,6 +274,9 @@ struct ForegroundConfig: Decodable {
     /// Delay (ms) before Barik is raised again after the auto-hidden system
     /// menu bar hides. See `Constants.menuBarRestoreDelayInMilliseconds`.
     let menuBarRestoreDelay: Int
+    /// Empty space kept above and below the widgets, as a fraction of the bar
+    /// height per side. Widget backgrounds shrink when they don't fit.
+    let verticalPaddingRatio: CGFloat
 
     init() {
         self.height = .barikDefault
@@ -281,6 +284,7 @@ struct ForegroundConfig: Decodable {
         self.widgetsBackground = WidgetBackgroundConfig()
         self.spacing = 15
         self.menuBarRestoreDelay = Constants.menuBarRestoreDelayInMilliseconds
+        self.verticalPaddingRatio = Constants.menuBarVerticalPaddingRatio
     }
     
     init(from decoder: Decoder) throws {
@@ -290,6 +294,16 @@ struct ForegroundConfig: Decodable {
         widgetsBackground = try container.decodeIfPresent(WidgetBackgroundConfig.self, forKey: .widgetsBackground) ?? WidgetBackgroundConfig()
         spacing = try container.decodeIfPresent(CGFloat.self, forKey: .spacing) ?? 15
         menuBarRestoreDelay = max(0, try container.decodeIfPresent(Int.self, forKey: .menuBarRestoreDelay) ?? Constants.menuBarRestoreDelayInMilliseconds)
+        // Clamp so at least 20% of the bar height is left for content.
+        verticalPaddingRatio = min(max(try container.decodeIfPresent(CGFloat.self, forKey: .verticalPaddingRatio) ?? Constants.menuBarVerticalPaddingRatio, 0), 0.4)
+    }
+
+    /// Height of the widgets' backgrounds (e.g. the spaces pills) in a bar of
+    /// `barHeight`, keeping `verticalPaddingRatio` free above and below. Only
+    /// the containers shrink; text keeps its size. Never exceeds the 1x size.
+    func widgetHeight(forBarHeight barHeight: CGFloat) -> CGFloat {
+        let available = barHeight * (1 - 2 * verticalPaddingRatio)
+        return max(1, min(Constants.widgetContentHeight, available))
     }
 
     enum CodingKeys: String, CodingKey {
@@ -298,6 +312,7 @@ struct ForegroundConfig: Decodable {
         case widgetsBackground = "widgets-background"
         case spacing
         case menuBarRestoreDelay = "menu-bar-restore-delay"
+        case verticalPaddingRatio = "vertical-padding-ratio"
     }
     
     func resolveHeight(for screen: NSScreen? = nil) -> CGFloat {

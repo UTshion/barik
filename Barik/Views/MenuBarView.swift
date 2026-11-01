@@ -3,6 +3,7 @@ import SwiftUI
 struct MenuBarView: View {
     @ObservedObject var configManager = ConfigManager.shared
     @ObservedObject var displayStore = DisplaySelectionStore.shared
+    @ObservedObject var menuBarHeights = MenuBarHeightStore.shared
 
     /// The display this bar instance is rendered on, used to size the bar to
     /// that screen's system menu bar height. `nil` falls back to the main screen.
@@ -27,6 +28,28 @@ struct MenuBarView: View {
                 .none
             }
 
+        let foreground = configManager.config.experimental.foreground
+        let barHeight = max(foreground.resolveHeight(for: screen), 1.0)
+
+        widgetRow
+            // On short menu bars (e.g. a 30pt external display) widget
+            // backgrounds shrink to keep some space above and below.
+            .environment(
+                \.barikWidgetHeight,
+                foreground.widgetHeight(forBarHeight: barHeight))
+            .frame(height: barHeight)
+        .frame(maxWidth: .infinity)
+        .padding(.horizontal, foreground.horizontalPadding)
+        // No full-width hit background: the bar floats above the system menu
+        // bar, so empty areas must stay fully transparent to let clicks reach
+        // native menu bar items. Each widget provides its own hit area.
+        .preferredColorScheme(theme)
+        .contextMenu { barikContextMenu }
+    }
+
+    /// The configured widgets.
+    @ViewBuilder
+    private var widgetRow: some View {
         let items = configManager.config.rootToml.widgets.displayed
 
         HStack(spacing: 0) {
@@ -47,14 +70,6 @@ struct MenuBarView: View {
             }
         }
         .foregroundStyle(Color.foregroundOutside)
-        .frame(height: max(configManager.config.experimental.foreground.resolveHeight(for: screen), 1.0))
-        .frame(maxWidth: .infinity)
-        .padding(.horizontal, configManager.config.experimental.foreground.horizontalPadding)
-        // No full-width hit background: the bar floats above the system menu
-        // bar, so empty areas must stay fully transparent to let clicks reach
-        // native menu bar items. Each widget provides its own hit area.
-        .preferredColorScheme(theme)
-        .contextMenu { barikContextMenu }
     }
 
     /// Right-click menu on Barik's own bar: display selection plus
