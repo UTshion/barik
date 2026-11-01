@@ -3,6 +3,7 @@ import SwiftUI
 struct MenuBarView: View {
     @ObservedObject var configManager = ConfigManager.shared
     @ObservedObject var displayStore = DisplaySelectionStore.shared
+    @ObservedObject var menuBarHeights = MenuBarHeightStore.shared
 
     /// The display this bar instance is rendered on, used to size the bar to
     /// that screen's system menu bar height. `nil` falls back to the main screen.
