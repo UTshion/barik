@@ -15,6 +15,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// auto-hidden menu bar, so the native one is on top and clickable.
     private let menuBarRevealMonitor = MenuBarRevealMonitor()
 
+    /// Delayed panel rebuild scheduled after a display configuration change.
+    private var pendingScreenRefresh: DispatchWorkItem?
+
     /// Displays where Barik currently sits beneath the system menu bar. Kept
     /// separately from the monitor's state so raising back can be delayed.
     private var loweredDisplayKeys: Set<String> = []
@@ -94,6 +97,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func screenParametersDidChange(_ notification: Notification) {
         logger.info("Screen parameters changed, reconfiguring panels")
         setupPanels()
+
+        // While a display is being plugged or unplugged, the screen list can
+        // be transiently incomplete (e.g. the built-in screen briefly missing),
+        // and no further notification may follow. Re-resolve once it settles.
+        pendingScreenRefresh?.cancel()
+        let refresh = DispatchWorkItem { [weak self] in
+            self?.setupPanels()
+        }
+        pendingScreenRefresh = refresh
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5, execute: refresh)
     }
 
     @objc private func displaySelectionDidChange(_ notification: Notification) {
