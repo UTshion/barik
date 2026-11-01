@@ -153,6 +153,33 @@ final class SpacesViewModel {
         }
     }
 
+    /// Moves one window from `source` into `target`, updating the bar
+    /// optimistically like `swapSpaces`.
+    func moveWindow(_ window: AnyWindow, from source: AnySpace, to target: AnySpace) {
+        guard source.id != target.id else { return }
+        spaces = spaces.compactMap { space in
+            switch space.id {
+            case source.id:
+                let remaining = space.windows.filter { $0.id != window.id }
+                // Providers list only spaces with windows; mirror that so an
+                // emptied space disappears right away.
+                guard !remaining.isEmpty else { return nil }
+                return AnySpace(
+                    id: space.id, isFocused: space.isFocused, windows: remaining)
+            case target.id:
+                return AnySpace(
+                    id: space.id, isFocused: space.isFocused,
+                    windows: space.windows + [window])
+            default:
+                return space
+            }
+        }
+        enqueue { provider in
+            await provider.moveWindow(
+                windowId: String(window.id), toSpaceId: target.id)
+        }
+    }
+
     private func enqueue(
         _ command: @escaping @Sendable (any SpacesProvider) async -> Void
     ) {

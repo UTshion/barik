@@ -51,6 +51,10 @@ nonisolated final class YabaiSpacesProvider: SpacesProvider {
         }
     }
 
+    @concurrent func moveWindow(windowId: String, toSpaceId: String) async {
+        _ = await run(["-m", "window", windowId, "--space", toSpaceId])
+    }
+
     private func fetchSpacesWithWindows() async -> [YabaiSpace]? {
         async let spacesTask: [YabaiSpace]? = decode(
             ["-m", "query", "--spaces"])

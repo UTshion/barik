@@ -9,14 +9,23 @@ struct SpacesWidget: View {
     /// X coordinate of this widget's leading edge in screen/global coordinates.
     @State private var widgetOriginX: CGFloat = 0
 
-    // MARK: Drag-to-reorder state
+    // MARK: Drag state
+    //
+    // Dragging a space's number (or anywhere on the pill outside a window
+    // icon) reorders spaces; dragging a window icon moves just that window.
+    // The icon's own gesture wins over the pill's because child gestures take
+    // precedence over a parent's `.gesture`.
 
-    private static let rowSpace = "barik.spaces.row"
+    fileprivate static let rowSpace = "barik.spaces.row"
     /// Frames of each space in the row's coordinate space, keyed by space ID.
     @State private var spaceFrames: [String: CGRect] = [:]
     @State private var draggedSpaceId: String?
     @State private var dragOffset: CGFloat = 0
     @State private var dropTargetId: String?
+    /// Window being dragged to another space, and the pointer location in the
+    /// row's coordinate space (drives the floating icon).
+    @State private var draggedWindow: AnyWindow?
+    @State private var windowDragLocation: CGPoint = .zero
 
     /// Maximum width this widget may occupy without entering the notch area.
     /// Nil means no constraint (non-notched screens or no detected notch apps).
@@ -73,7 +82,12 @@ struct SpacesWidget: View {
         HStack(spacing: foregroundHeight < 30 ? 0 : 8) {
             ForEach(viewModel.spaces) { space in
                 let isDragged = draggedSpaceId == space.id
-                SpaceView(space: space)
+                SpaceView(
+                    space: space,
+                    windowDrag: WindowDragHandlers(
+                        draggedWindowId: draggedWindow?.id,
+                        onChanged: windowDragChanged,
+                        onEnded: windowDragEnded))
                     .id(space.id)  // Required for ScrollViewReader.scrollTo(_:)
                     .onGeometryChange(for: CGRect.self) {
                         $0.frame(in: .named(Self.rowSpace))
@@ -96,7 +110,52 @@ struct SpacesWidget: View {
             }
         }
         .coordinateSpace(.named(Self.rowSpace))
+        // The dragged window icon floats over the whole row; drawing it inside
+        // its own pill would clip it as soon as it leaves the pill.
+        .overlay {
+            if let draggedWindow {
+                GeometryReader { geometry in
+                    WindowDragGhost(window: draggedWindow)
+                        .position(
+                            x: windowDragLocation.x,
+                            y: geometry.size.height / 2)
+                }
+                .allowsHitTesting(false)
+            }
+        }
         .experimentalConfiguration(horizontalPadding: 5, cornerRadius: 10)
+    }
+
+    // MARK: - Drag a window to another space
+
+    /// Space under `x` in the row's coordinate space, excluding `excludedId`.
+    private func space(atX x: CGFloat, excluding excludedId: String) -> String? {
+        spaceFrames.first { id, frame in
+            id != excludedId && frame.minX <= x && x <= frame.maxX
+        }?.key
+    }
+
+    private func windowDragChanged(
+        _ window: AnyWindow, from source: AnySpace, _ value: DragGesture.Value
+    ) {
+        draggedWindow = window
+        windowDragLocation = value.location
+        let target = space(atX: value.location.x, excluding: source.id)
+        if target != dropTargetId {
+            withAnimation(.smooth(duration: 0.15)) { dropTargetId = target }
+        }
+    }
+
+    private func windowDragEnded(_ window: AnyWindow, from source: AnySpace) {
+        if let targetId = dropTargetId,
+            let target = viewModel.spaces.first(where: { $0.id == targetId })
+        {
+            viewModel.moveWindow(window, from: source, to: target)
+        }
+        withAnimation(.smooth(duration: 0.25)) {
+            draggedWindow = nil
+            dropTargetId = nil
+        }
     }
 
     // MARK: - Drag to reorder
@@ -108,10 +167,7 @@ struct SpacesWidget: View {
             .onChanged { value in
                 draggedSpaceId = space.id
                 dragOffset = value.translation.width
-                let x = value.location.x
-                let target = spaceFrames.first { id, frame in
-                    id != space.id && frame.minX <= x && x <= frame.maxX
-                }?.key
+                let target = self.space(atX: value.location.x, excluding: space.id)
                 if target != dropTargetId {
                     withAnimation(.smooth(duration: 0.15)) { dropTargetId = target }
                 }
@@ -131,6 +187,37 @@ struct SpacesWidget: View {
     }
 }
 
+/// Callbacks for dragging a single window icon, owned by `SpacesWidget`.
+private struct WindowDragHandlers {
+    /// ID of the window currently being dragged, if any.
+    var draggedWindowId: Int?
+    var onChanged: (AnyWindow, AnySpace, DragGesture.Value) -> Void
+    var onEnded: (AnyWindow, AnySpace) -> Void
+}
+
+/// The icon that follows the pointer while a window is dragged.
+private struct WindowDragGhost: View {
+    let window: AnyWindow
+
+    @Environment(\.barikWidgetHeight) private var widgetHeight
+
+    var body: some View {
+        let size = min(21, widgetHeight - 5)
+        Group {
+            if let appName = window.appName,
+                let icon = IconCache.shared.icon(for: appName)
+            {
+                Image(nsImage: icon).resizable()
+            } else {
+                Image(systemName: "questionmark.circle").resizable()
+            }
+        }
+        .frame(width: size, height: size)
+        .scaleEffect(1.15)
+        .shadow(color: .iconShadow, radius: 4)
+    }
+}
+
 /// This view shows a space with its windows.
 private struct SpaceView: View {
     @EnvironmentObject var configProvider: ConfigProvider
@@ -146,6 +233,7 @@ private struct SpaceView: View {
     var showKey: Bool { spaceConfig["show-key"]?.boolValue ?? true }
 
     let space: AnySpace
+    let windowDrag: WindowDragHandlers
     @State var isHovered = false
 
     var body: some View {
@@ -169,7 +257,7 @@ private struct SpaceView: View {
             }
             HStack(spacing: 2) {
                 ForEach(space.windows) { window in
-                    WindowView(window: window, space: space)
+                    WindowView(window: window, space: space, drag: windowDrag)
                 }
             }
             Spacer().frame(width: 10)
@@ -214,6 +302,7 @@ private struct WindowView: View {
 
     let window: AnyWindow
     let space: AnySpace
+    let drag: WindowDragHandlers
 
     @Environment(\.barikWidgetHeight) private var widgetHeight
     @State var isHovered = false
@@ -268,10 +357,22 @@ private struct WindowView: View {
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         .animation(.smooth, value: isHovered)
         .frame(height: widgetHeight)
+        // The floating ghost stands in for the icon while it is dragged.
+        .opacity(drag.draggedWindowId == window.id ? 0.3 : 1)
         .contentShape(Rectangle())
         .onTapGesture {
             viewModel.switchToWindow(window, in: space)
         }
+        // Dragging the icon moves this window to the space it is dropped on.
+        // Taps still win; the drag starts once the pointer moves a few points.
+        .gesture(
+            DragGesture(
+                minimumDistance: 6,
+                coordinateSpace: .named(SpacesWidget.rowSpace)
+            )
+            .onChanged { value in drag.onChanged(window, space, value) }
+            .onEnded { _ in drag.onEnded(window, space) }
+        )
         .onHover { value in
             isHovered = value
         }

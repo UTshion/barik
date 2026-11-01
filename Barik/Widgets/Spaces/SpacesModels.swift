@@ -25,6 +25,8 @@ nonisolated protocol SpacesProvider: Sendable {
     @concurrent func focusWindow(windowId: String) async
     /// Moves every window of `first` into `second` and vice versa.
     @concurrent func swapSpaces(_ first: AnySpace, _ second: AnySpace) async
+    /// Moves a single window to another space without following it.
+    @concurrent func moveWindow(windowId: String, toSpaceId: String) async
 }
 
 nonisolated struct AnyWindow: Identifiable, Equatable, Sendable {

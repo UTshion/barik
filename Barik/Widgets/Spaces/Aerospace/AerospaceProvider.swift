@@ -87,6 +87,10 @@ nonisolated final class AerospaceSpacesProvider: SpacesProvider {
         }
     }
 
+    @concurrent func moveWindow(windowId: String, toSpaceId: String) async {
+        _ = await run(["move-node-to-workspace", "--window-id", windowId, toSpaceId])
+    }
+
     private func run(_ arguments: [String]) async -> Data? {
         guard
             let result = await SubprocessRunner.run(
