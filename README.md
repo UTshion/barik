@@ -129,6 +129,7 @@ height = "default"        # available values: default (55.0), menu-bar (height l
 horizontal-padding = 25   # padding on the left and right corners
 spacing = 15              # spacing between widgets
 menu-bar-restore-delay = 400 # ms to wait before Barik rises back above an auto-hidden system menu bar after it hides
+vertical-padding-ratio = 0.1 # free space above and below the widgets as a fraction of the bar height per side (0-0.4); the spaces pills shrink to fit
 
 [experimental.foreground.widgets-background] # settings for widgets background
 displayed = false                            # wrap widgets in their own background
