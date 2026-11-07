@@ -15,6 +15,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// auto-hidden menu bar, so the native one is on top and clickable.
     private let menuBarRevealMonitor = MenuBarRevealMonitor()
 
+    /// Hides Barik on displays showing a full-screen window (video, native
+    /// full-screen apps), where the bar would otherwise cover content.
+    private let fullscreenMonitor = FullscreenMonitor()
+    /// Panels Barik last ordered front, so showing them again is done once
+    /// per hide rather than on every full-screen tick.
+    private var shownPanelKeys: Set<ObjectIdentifier> = []
+
     /// Delayed panel rebuild scheduled after a display configuration change.
     private var pendingScreenRefresh: DispatchWorkItem?
 
@@ -59,6 +66,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self?.menuBarRevealDidChange(revealed)
         }
         menuBarRevealMonitor.start()
+
+        fullscreenMonitor.onChange = { [weak self] _ in
+            self?.applyPanelVisibility()
+        }
+        fullscreenMonitor.start()
 
         NotificationCenter.default.addObserver(
             self,
@@ -170,6 +182,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 frame: screen.frame,
                 level: menuBarLevel(for: key),
                 hostingRootView: AnyView(MenuBarView(displayKey: key)))
+        }
+
+        // `setupPanel` just ordered every panel front; start tracking afresh
+        // (this also drops panels torn down above).
+        shownPanelKeys = []
+        applyPanelVisibility()
+    }
+
+    /// Shows each display's panels, except on displays with a full-screen
+    /// window, where they are ordered out so they neither cover the content
+    /// nor take clicks.
+    ///
+    /// `isVisible` is not trusted here: on a full-screen space it can read
+    /// `false` for an all-spaces panel that is still on screen, which used to
+    /// skip the order-out until the pointer hovered the bar.
+    private func applyPanelVisibility() {
+        let hiddenKeys = fullscreenMonitor.fullscreenKeys
+        let panels =
+            backgroundPanels.map { ($0.key, $0.value) }
+            + menuBarPanels.map { ($0.key, $0.value) }
+        for (key, panel) in panels {
+            if hiddenKeys.contains(key) {
+                panel.orderOut(nil)
+                shownPanelKeys.remove(ObjectIdentifier(panel))
+            } else if !shownPanelKeys.contains(ObjectIdentifier(panel)) {
+                panel.orderFront(nil)
+                shownPanelKeys.insert(ObjectIdentifier(panel))
+            }
         }
     }
 
