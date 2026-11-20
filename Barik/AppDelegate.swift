@@ -279,7 +279,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return
         }
 
-        let newPanel = NSPanel(
+        let newPanel = PinnedPanel(
             contentRect: frame,
             styleMask: [.nonactivatingPanel],
             backing: .buffered,
