@@ -4,10 +4,11 @@ struct Constants {
     static let menuBarHeight = CGFloat(55)
     static let menuBarPopupAnimationDurationInMilliseconds = 350
     static let menuBarHorizontalPadding = CGFloat(25)
-    /// How long to wait after the cursor leaves an auto-hidden system menu bar
-    /// before raising Barik back above it, so macOS can finish sliding the
-    /// menu bar out instead of the two briefly overlapping.
-    static let menuBarRestoreDelayInMilliseconds = 400
+    /// How long to wait after an auto-hidden system menu bar is gone before
+    /// raising Barik back above it, so macOS can finish sliding the menu bar
+    /// out instead of the two briefly overlapping. Kept short: until Barik is
+    /// raised, clicks on it go to the system menu bar and reveal it again.
+    static let menuBarRestoreDelayInMilliseconds = 200
     /// Full height of widget backgrounds such as the spaces pills. Bars too
     /// short to fit this plus their vertical padding use shorter backgrounds.
     static let widgetContentHeight = CGFloat(30)

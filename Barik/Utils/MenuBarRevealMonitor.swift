@@ -1,15 +1,17 @@
 import AppKit
 
-/// Tracks the cursor to detect when macOS reveals an auto-hidden system menu
-/// bar, so Barik can step aside and let the real menu bar sit on top and
-/// receive clicks.
+/// Detects when macOS reveals an auto-hidden system menu bar, so Barik can
+/// step aside and let the real menu bar sit on top and receive clicks.
 ///
-/// macOS reveals a hidden menu bar when the cursor touches the top edge of a
-/// display. There is no public API that reports this state, so revealing is
-/// detected from mouse-move events. Hiding is not: macOS keeps the menu bar
-/// up for a while after the cursor leaves its strip (e.g. while it hovers the
-/// gap above a maximized window), so once revealed, a display stays revealed
-/// until the system menu bar window is actually off screen again.
+/// There is no public API that reports this state. Two signals are combined:
+/// - the cursor touching the top edge of a display, which is how the menu bar
+///   is usually revealed and reacts instantly on mouse moves;
+/// - the system menu bar window actually being on screen, polled from the
+///   window list. This also catches reveals with other triggers (keyboard
+///   menu access, menu bar managers such as Ice, apps opening a status item
+///   menu), and keeps the display revealed while macOS still shows the menu
+///   bar after the cursor left its strip (e.g. over the gap above a maximized
+///   window).
 final class MenuBarRevealMonitor {
     /// Called with the display keys whose menu bar is currently revealed.
     var onChange: ((Set<String>) -> Void)?
@@ -20,6 +22,16 @@ final class MenuBarRevealMonitor {
     /// Re-checks the menu bar windows while a menu bar is revealed, so hiding
     /// is noticed even if the cursor stops moving.
     private var hidePollTimer: Timer?
+    /// Slower always-on check for reveals that don't come from the cursor.
+    private var revealPollTimer: Timer?
+    /// When the cursor last touched the top edge of each display.
+    private var lastEdgeHit: [String: Date] = [:]
+    /// How long after touching the top edge the cursor's position may keep a
+    /// display revealed while the menu bar window is still sliding in. After
+    /// that only the window counts: Barik's widgets live in the same strip, so
+    /// letting the cursor hold it would keep Barik lowered — and its clicks
+    /// going to the system menu bar — whenever the user reaches for Barik.
+    private static let edgeGracePeriod: TimeInterval = 0.6
 
     func start() {
         guard globalMonitor == nil else { return }
@@ -37,6 +49,10 @@ final class MenuBarRevealMonitor {
             MainActor.assumeIsolated { self?.update() }
             return event
         }
+        revealPollTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) {
+            [weak self] _ in
+            MainActor.assumeIsolated { self?.update(checkWindows: true) }
+        }
     }
 
     func stop() {
@@ -46,15 +62,19 @@ final class MenuBarRevealMonitor {
         localMonitor = nil
         hidePollTimer?.invalidate()
         hidePollTimer = nil
+        revealPollTimer?.invalidate()
+        revealPollTimer = nil
     }
 
-    private func update() {
+    /// - Parameter checkWindows: query the window list even when nothing is
+    ///   revealed. Mouse moves arrive far too often for that, so they only do
+    ///   it while something is revealed; the timers always do.
+    private func update(checkWindows: Bool = false) {
         let location = NSEvent.mouseLocation
         var revealed = Set<String>()
-        // Only query the window list while something is revealed; that is
-        // the only time it can change the outcome.
         let visibleMenuBars =
-            revealedKeys.isEmpty ? [] : Self.visibleSystemMenuBarKeys()
+            checkWindows || !revealedKeys.isEmpty
+            ? Self.visibleSystemMenuBarKeys() : []
 
         for screen in NSScreen.screens where Self.menuBarAutoHides(on: screen) {
             let frame = screen.frame
@@ -65,16 +85,20 @@ final class MenuBarRevealMonitor {
 
             if cursorOnScreen, location.y >= frame.maxY - 1 {
                 // Touching the top edge reveals the menu bar.
+                lastEdgeHit[key] = Date()
                 revealed.insert(key)
-            } else if revealedKeys.contains(key) {
-                // Stay revealed while the cursor is inside the strip, or while
-                // macOS still shows the menu bar after the cursor left it.
-                let inStrip =
-                    cursorOnScreen
-                    && location.y >= frame.maxY - Self.menuBarHeight(on: screen)
-                if inStrip || visibleMenuBars.contains(key) {
-                    revealed.insert(key)
-                }
+            } else if visibleMenuBars.contains(key) {
+                // The menu bar is on screen, whatever revealed it.
+                revealed.insert(key)
+            } else if revealedKeys.contains(key),
+                cursorOnScreen,
+                location.y >= frame.maxY - Self.menuBarHeight(on: screen),
+                let hit = lastEdgeHit[key],
+                Date().timeIntervalSince(hit) < Self.edgeGracePeriod
+            {
+                // Just revealed and still inside the strip; the menu bar
+                // window may not be on screen yet.
+                revealed.insert(key)
             }
         }
 
@@ -90,7 +114,7 @@ final class MenuBarRevealMonitor {
             hidePollTimer = Timer.scheduledTimer(
                 withTimeInterval: 0.1, repeats: true
             ) { [weak self] _ in
-                MainActor.assumeIsolated { self?.update() }
+                MainActor.assumeIsolated { self?.update(checkWindows: true) }
             }
         } else if !active, let timer = hidePollTimer {
             timer.invalidate()
